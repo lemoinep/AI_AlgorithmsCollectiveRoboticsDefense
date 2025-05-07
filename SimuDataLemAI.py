@@ -11,25 +11,26 @@ import random
 import math
 import time
 
-# Paramètres simulation
-N_ANTS = 30
+# Simulation settings
+N_DA3DRS = 100
 SPACE_SIZE = 50
-ANT_SPEED = 0.3
+DA3DR_SPEED = 0.3
 ATTACK_RANGE = 2.0
-TARGET_SPEED = 0.05  # vitesse des cibles mobiles
-FIXED_TARGET_INACTIVE_DELAY = 5.0  # secondes avant qu'une cible fixe devienne inactive
-MOVING_TARGET_INACTIVE_DELAY = 15.0  # délai plus long pour cibles mobiles
-SHRINK_DURATION = 5.0  # durée en secondes pour disparition progressive
+TARGET_SPEED = 0.05 # Mobile target speed
+FIXED_TARGET_INACTIVE_DELAY = 5.0  # seconds before a fixed target becomes inactive
+MOVING_TARGET_INACTIVE_DELAY = 15.0  # longer delay for mobile targets
+SHRINK_DURATION = 5.0  # Duration in seconds for gradual disappearance
 
-# Création fenêtre avec contexte OpenGL 2.1 compatibility profile
+
 config = pyglet.gl.Config(major_version=2, minor_version=1, double_buffer=True)
-window = pyglet.window.Window(800, 600, "Simulation Drone 3D - Cibles dynamiques", resizable=True, config=config)
+window = pyglet.window.Window(800, 600, "Simulation Drone Avatar 3D robots - Dynamic targets", resizable=True, config=config)
 window.set_minimum_size(400, 300)
 
 rot_x, rot_y = 25, -45
 zoom = -60
+nbRandomTarget = 5
 
-new_targets_spawned = False  # Flag pour éviter multi-créations
+new_targets_spawned = False # Flag to avoid multi-creation
 
 class FixedTarget:
     def __init__(self, pos):
@@ -37,15 +38,15 @@ class FixedTarget:
         self.active = True
         self.occupied_since = None
         self.inactive_since = None
-        self.size = 2.0  # taille initiale
+        self.size = 2.0  # Initial size
 
-    def update_status(self, ants):
+    def update_status(self, DA3DRs):
         if not self.active:
             return
         now = time.time()
         occupied = any(
-            math.sqrt(sum((a - t)**2 for a, t in zip(ant.pos, self.pos))) < ATTACK_RANGE
-            for ant in ants
+            math.sqrt(sum((a - t)**2 for a, t in zip(DA3DR.pos, self.pos))) < ATTACK_RANGE
+            for DA3DR in DA3DRs
         )
         if occupied:
             if self.occupied_since is None:
@@ -66,7 +67,7 @@ class FixedTarget:
         elapsed = time.time() - self.inactive_since
         ratio = max(0.0, 1.0 - elapsed / SHRINK_DURATION)
         self.size = 2.0 * ratio
-        return ratio > 0.01  # True = visible, False = à supprimer
+        return ratio > 0.01 # True = visible, false = to delete
 
 class MovingTarget:
     def __init__(self, pos):
@@ -81,20 +82,20 @@ class MovingTarget:
 
     def update(self):
         if not self.active:
-            return  # Arrêt du mouvement si inactive
+            return  # Stopping the movement if inactive
         for i in range(3):
             self.pos[i] += self.dir[i] * TARGET_SPEED
             if self.pos[i] < -SPACE_SIZE/2 or self.pos[i] > SPACE_SIZE/2:
                 self.dir[i] = -self.dir[i]
                 self.pos[i] = max(min(self.pos[i], SPACE_SIZE/2), -SPACE_SIZE/2)
 
-    def update_status(self, ants):
+    def update_status(self, DA3DRs):
         if not self.active:
             return
         now = time.time()
         occupied = any(
-            math.sqrt(sum((a - t)**2 for a, t in zip(ant.pos, self.pos))) < ATTACK_RANGE
-            for ant in ants
+            math.sqrt(sum((a - t)**2 for a, t in zip(DA3DR.pos, self.pos))) < ATTACK_RANGE
+            for DA3DR in DA3DRs
         )
         if occupied:
             if self.occupied_since is None:
@@ -117,7 +118,7 @@ class MovingTarget:
         self.size = 2.0 * ratio
         return ratio > 0.01
 
-class Ant3D:
+class DA3DR3D:
     def __init__(self):
         self.pos = [random.uniform(-SPACE_SIZE/2, SPACE_SIZE/2) for _ in range(3)]
         self.state = "exploring"
@@ -150,7 +151,7 @@ class Ant3D:
 
     def move_towards(self):
         if self.target is None:
-            self.pos = [p + d*ANT_SPEED for p,d in zip(self.pos, self.dir)]
+            self.pos = [p + d*DA3DR_SPEED for p,d in zip(self.pos, self.dir)]
             for i in range(3):
                 if self.pos[i] < -SPACE_SIZE/2 or self.pos[i] > SPACE_SIZE/2:
                     self.dir[i] = -self.dir[i]
@@ -173,7 +174,7 @@ class Ant3D:
             self.state = "exploring"
             self.dir = [0.8*d + 0.2*(v/dist) for d,v in zip(self.dir, (vx, vy, vz))]
             self.normalize_dir()
-            self.pos = [p + d*ANT_SPEED for p,d in zip(self.pos, self.dir)]
+            self.pos = [p + d*DA3DR_SPEED for p,d in zip(self.pos, self.dir)]
             for i in range(3):
                 self.pos[i] = max(-SPACE_SIZE/2, min(SPACE_SIZE/2, self.pos[i]))
 
@@ -242,9 +243,9 @@ all_targets = fixed_targets + moving_targets
 def all_targets_inactive(targets):
     return all(not t.active for t in targets)
 
-ants = [Ant3D() for _ in range(N_ANTS)]
+DA3DRs = [DA3DR3D() for _ in range(N_DA3DRS)]
 
-new_targets_spawned = False  # Flag pour éviter multi-créations
+new_targets_spawned = False # Flag to avoid multi-creation
 
 @window.event
 def on_draw():
@@ -260,12 +261,12 @@ def on_draw():
     draw_axes(20)
     draw_grid(25, 5)
 
-    # Mise à jour et nettoyage cibles fixes
+    # Update and fixed target cleaning
     fixed_targets[:] = [t for t in fixed_targets if t.update_size_and_lifetime()]
-    # Mise à jour et nettoyage cibles mobiles
+    # Mobile target update and cleaning
     moving_targets[:] = [t for t in moving_targets if t.update_size_and_lifetime()]
 
-    # Dessiner cibles fixes
+    # Draw fixed targets
     for t in fixed_targets:
         glPushMatrix()
         glTranslatef(*t.pos)
@@ -276,7 +277,7 @@ def on_draw():
         draw_sphere(t.size, 20, 20)
         glPopMatrix()
 
-    # Dessiner cibles mobiles
+    # Draw Mobile Targets
     for mt in moving_targets:
         glPushMatrix()
         glTranslatef(*mt.pos)
@@ -287,19 +288,19 @@ def on_draw():
         draw_sphere(mt.size, 20, 20)
         glPopMatrix()
 
-    # Mise à jour cibles mobiles (mouvement + statut)
+    # Mobile target update (movement + status)
     for mt in moving_targets:
         mt.update()
-        mt.update_status(ants)
+        mt.update_status(DA3DRs)
 
     # Mise à jour cibles fixes (statut)
     for t in fixed_targets:
-        t.update_status(ants)
+        t.update_status(DA3DRs)
 
-    # Vérifier si toutes les cibles sont inactives
+    # Check if all the targets are inactive
     if all_targets_inactive(all_targets):
         if not new_targets_spawned:
-            n_new_targets = random.randint(1, 3)
+            n_new_targets = random.randint(1, nbRandomTarget)
             for _ in range(n_new_targets):
                 start_z = random.uniform(-3 * SPACE_SIZE, -2 * SPACE_SIZE)
                 start_x = random.uniform(-SPACE_SIZE/2, SPACE_SIZE/2)
@@ -311,26 +312,26 @@ def on_draw():
     else:
         new_targets_spawned = False
 
-    # Répartir les fourmis sur cibles mobiles actives
-    assign_ants_to_moving_targets(ants, moving_targets)
+    # Distribute DA3DRs on active mobile targets
+    assign_DA3DRs_to_moving_targets(DA3DRs, moving_targets)
 
-    # Drone choisissent une cible si pas assignée ou cible inactive
-    for ant in ants:
-        if ant.target is None or (ant.target and not ant.target.active):
-            ant.choose_target([t for t in all_targets if t.active and t not in moving_targets])
-        ant.move_towards()
-        ant.draw()
+    # DroneAvatar3Drobots choose a target if not assigned or inactive target
+    for DA3DR in DA3DRs:
+        if DA3DR.target is None or (DA3DR.target and not DA3DR.target.active):
+            DA3DR.choose_target([t for t in all_targets if t.active and t not in moving_targets])
+        DA3DR.move_towards()
+        DA3DR.draw()
 
-def assign_ants_to_moving_targets(ants, moving_targets):
+def assign_DA3DRs_to_moving_targets(DA3DRs, moving_targets):
     active_targets = [t for t in moving_targets if t.active]
     n_targets = len(active_targets)
     if n_targets == 0:
-        for ant in ants:
-            ant.target = None
+        for DA3DR in DA3DRs:
+            DA3DR.target = None
         return
-    for i, ant in enumerate(ants):
+    for i, DA3DR in enumerate(DA3DRs):
         target_index = i % n_targets
-        ant.target = active_targets[target_index]
+        DA3DR.target = active_targets[target_index]
 
 @window.event
 def on_resize(width, height):
