@@ -9,6 +9,9 @@ This repository extends prior developments to produce high-fidelity simulations 
 <p align="center">
 <img src="Images/P0002.jpg" width="100%" />
 </p>
+<p align="center">
+<img src="Images/P0003.jpg" width="100%" />
+</p>
 
 
 ## **Detailed Python Program Descriptions**

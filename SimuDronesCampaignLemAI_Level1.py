@@ -13,12 +13,15 @@ from matplotlib.animation import FuncAnimation
 
 import numpy as np
 
+# Todo : - Next step Store these parameters in a JSON file so that other scenarios can be loaded.
+#        - Perform the visualization using OpenGL or Unity3D – to be decided.
+#        - Improve the AI ​​and tactics, add a learning model, and enhance group behavior.
+#        - See how to integrate this with real drones.
 
 # ============================================================
 # CONFIG SCENARIO / WEATHER / VISU
 # ============================================================
 
-# Todo : Next step Store these parameters in a JSON file so that other scenarios can be loaded.
 
 CONFIG = {
     # --- Scenario ---
