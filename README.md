@@ -222,7 +222,17 @@ This program is a configurable 3D drone battle simulator where blue and red squa
 Note: I will be adding the improvements soon...
 In the meantime, I invite you to check out my other repository: https://github.com/lemoinep/SunTzuMilitaryCampaignSimulator
 
+---
 
+#### SimuDronesCampaignLemAI_Level2.py 
+
+In this version, the simulation introduces **electromagnetic pulse (EMP) weapons** (systems similar to *SPEAR/THOR* ) as a new capability for certain drones. These high-power electromagnetic pulses do not destroy targets through kinetic impact, but instead temporarily disable their onboard electronic systems, reducing their health points, draining their batteries, and preventing them from moving or firing for several turns.
+
+EMP weapons are modeled as area-of-effect systems: when activated, they affect all enemy drones within a configurable radius, making them particularly effective against clustered formations and drone swarms. An AI controller determines the optimal time to trigger these pulses by evaluating the local density of enemy drones, the distance to threats, and the health of the firing drone, ensuring that EMP shots are used sparingly and only when they can neutralize multiple opponents or turn the tide of a battle.
+
+Tactically, this creates a new strategic dimension in the simulation: drones equipped with EMP weapons can sacrifice some kinetic firing opportunities to influence the battlefield, immobilizing enemy units, forcing them to reposition, and creating openings for conventional attacks. By enabling the ENABLE_EMP_WEAPONS option, users can directly compare battles with and without electromagnetic weapons and study how access to these non-kinetic area control tools alters strategies and outcomes at the drone swarm level.
+
+---
 
 ## For more information
 
