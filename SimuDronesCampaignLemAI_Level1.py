@@ -1,5 +1,7 @@
 # Author(s): Dr. Patrick Lemoine
 # Simulation: Collective Robotics Defense with AI
+# For now we will use a swarm of small drones and later we will use AI robot agents 
+# which will have different characteristics and will be deployed by a strategic AI.
 
 import math
 import random
@@ -8,26 +10,27 @@ from enum import Enum
 from typing import List, Optional, Tuple, Dict, Any
 
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D 
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 from matplotlib.animation import FuncAnimation
 
 import numpy as np
 
-# Todo : - Next step Store these parameters in a JSON file so that other scenarios can be loaded.
-#        - Perform the visualization using OpenGL or Unity3D – to be decided.
-#        - Improve the AI ​​and tactics, add a learning model, and enhance group behavior.
-#        - See how to integrate this with real drones.
+# Todo :
+# - Next step Store these parameters in a JSON file so that other scenarios can be loaded.
+# - Perform the visualization using OpenGL or Unity3D – to be decided.
+# - Improve the AI ​​and tactics, add a learning model, and enhance group behavior.
+# - See how to integrate this with real drones.
+
 
 # ============================================================
 # CONFIG SCENARIO / WEATHER / VISU
 # ============================================================
 
-
 CONFIG = {
     # --- Scenario ---
     "NUM_BLUE_DRONES": 10,
     "NUM_RED_DRONES": 10,
-    "MAX_TURNS": 5000,
+    "MAX_TURNS": 50000,
     "MAP_WIDTH": 100,
     "MAP_HEIGHT": 100,
 
@@ -36,11 +39,11 @@ CONFIG = {
     "PLAYER_MAX_ACCEL": 10.0,
     "ENEMY_MAX_SPEED": 20.0,
     "ENEMY_MAX_ACCEL": 10.0,
-    "LOW_HP_THRESHOLD": 30.0,   
+    "LOW_HP_THRESHOLD": 30.0,
 
     # --- Volume / Altitude ---
     "MIN_ALTITUDE": 0.0,
-    "MAX_ALTITUDE_TEAM": {      # 1 = player, 2 = enemy
+    "MAX_ALTITUDE_TEAM": {  # 1 = player, 2 = enemy
         1: 150.0,
         2: 200.0,
     },
@@ -72,7 +75,7 @@ CONFIG = {
     },
 
     # --- Visualisation / Heatmaps ---
-    "HEATMAP_TURNS": None,   # None => début / milieu / fin
+    "HEATMAP_TURNS": None,  # None => start / mid / end
 }
 
 
@@ -81,7 +84,7 @@ CONFIG = {
 # ============================================================
 
 def angle_wrap(angle: float) -> float:
-    """Garde un angle dans [-pi, pi]."""
+    """Clamp angle in [-pi, pi]."""
     while angle > math.pi:
         angle -= 2.0 * math.pi
     while angle < -math.pi:
@@ -98,6 +101,13 @@ class DroneStatus(Enum):
     DESTROYED = "DESTROYED"  # kept for completeness
     OUT_OF_BATTERY = "OUT_OF_BATTERY"
     INTERCEPTED = "INTERCEPTED"  # shot down and crashed to the ground
+
+
+class DroneRole(Enum):
+    SCOUT = "SCOUT"          # high speed, information / flanking
+    SNIPER = "SNIPER"        # long-range fire, keeps distance
+    TANK = "TANK"            # front line, closes distance, soaks damage
+    DECOY = "DECOY"          # draws fire, baits encirclement
 
 
 @dataclass
@@ -117,7 +127,8 @@ class DroneUnit:
 
     sensor_range: float = 30.0
     weapon_range: float = 20.0
-    
+
+    # Legacy scalar speed; we keep it for compatibility
     max_speed: float = 5.0
 
     status: DroneStatus = DroneStatus.ACTIVE
@@ -130,8 +141,8 @@ class DroneUnit:
     yaw_rate: float = 0.0
 
     # Dynamic parameters
-    dyn_max_speed: float = 20.0      # maximum horizontal speed (m/s)
-    dyn_max_accel: float = 10.0      # accel max (m/s^2)
+    dyn_max_speed: float = 20.0  # maximum horizontal speed (m/s)
+    dyn_max_accel: float = 10.0  # accel max (m/s^2)
     dyn_max_yaw_rate: float = math.radians(45.0)  # rad/s
     climb_speed_factor: float = 0.5  # ratio vertical / horizontal
 
@@ -140,6 +151,9 @@ class DroneUnit:
     base_consumption: float = 0.001
     speed_consumption: float = 0.00005
     climb_consumption: float = 0.0001
+
+    # Strategic role
+    role: DroneRole = DroneRole.SCOUT
 
     def is_alive(self) -> bool:
         return self.status == DroneStatus.ACTIVE and self.hp > 0
@@ -234,11 +248,10 @@ class CampaignState:
 class VolumeConstraints:
     def __init__(self):
         self.min_altitude = CONFIG["MIN_ALTITUDE"]
-        # plafond par équipe: 1=player, 2=enemy
+        # altitude ceiling per team: 1=player, 2=enemy
         self.max_altitude_team: Dict[int, float] = CONFIG["MAX_ALTITUDE_TEAM"].copy()
         # Cylindrical NFZ zones
         self.no_fly_zones: List[Dict[str, Any]] = []
-       
         for cx, cy, radius, z_min, z_max in CONFIG["NFZ_LIST"]:
             self.add_nfz_cylinder(center=(cx, cy),
                                   radius=radius,
@@ -272,7 +285,7 @@ class Weather:
 
 
 def apply_volume_constraints(drone: DroneUnit, constraints: VolumeConstraints):
-    # map team string -> index (1 ou 2)
+    # map team string -> index (1 or 2)
     team_id = 1 if drone.team == "player" else 2
     max_alt = constraints.max_altitude_team.get(team_id, None)
 
@@ -327,7 +340,7 @@ def update_battery(drone: DroneUnit, weather: Weather, dt: float):
     drone.battery_level -= cons * dt
     drone.battery_level = max(drone.battery_level, 0.0)
 
-    # To maintain compatibility with the "battery" field
+    # Maintain compatibility with the "battery" field
     drone.battery -= cons * dt * 1000.0
     drone.battery = max(drone.battery, 0.0)
 
@@ -341,14 +354,16 @@ def update_battery(drone: DroneUnit, weather: Weather, dt: float):
 
 
 # ============================================================
-#3. Drone dynamics (inertia, acceleration, yaw)
+# 3. Drone dynamics (inertia, acceleration, yaw)
 # ============================================================
 
-def update_drone_dynamics(drone: DroneUnit,
-                          desired_vel: Tuple[float, float, float],
-                          dt: float):
+def update_drone_dynamics(
+    drone: DroneUnit,
+    desired_vel: Tuple[float, float, float],
+    dt: float
+):
     """
-    desired_vel: Target velocity vector (vx, vy, vz) coming from the AI. 
+    desired_vel: Target velocity vector (vx, vy, vz) coming from the AI.
     A simple dynamic model is applied with limited acceleration
     and maximum angular velocity (yaw_rate).
     """
@@ -390,8 +405,10 @@ def update_drone_dynamics(drone: DroneUnit,
     drone.vx, drone.vy = float(vxy[0]), float(vxy[1])
 
     # Vertical component (slower)
-    desired_vz = max(-drone.dyn_max_speed * drone.climb_speed_factor,
-                     min(drone.dyn_max_speed * drone.climb_speed_factor, dvz))
+    desired_vz = max(
+        -drone.dyn_max_speed * drone.climb_speed_factor,
+        min(drone.dyn_max_speed * drone.climb_speed_factor, dvz),
+    )
     dvz_cmd = desired_vz - drone.vz
     max_dvz = drone.dyn_max_accel * dt * drone.climb_speed_factor
     dvz_cmd = max(-max_dvz, min(max_dvz, dvz_cmd))
@@ -413,30 +430,73 @@ def update_drone_dynamics(drone: DroneUnit,
 # 4. Drone interception helper
 # ============================================================
 
-def drone_intercepted(drone: DroneUnit, campaign_state: Optional[CampaignState] = None) -> None:
+def drone_intercepted(
+    drone: DroneUnit,
+    campaign_state: Optional[CampaignState] = None
+) -> None:
     """Handle interception: drone is shot down, falls to the ground and becomes 'INTERCEPTED'."""
     drone.hp = 0.0
     drone.status = DroneStatus.INTERCEPTED
     drone.z = 0.0  # on the ground
     drone.vx = drone.vy = drone.vz = 0.0
     if campaign_state is not None:
-        campaign_state.log(f"[Drone] {drone.id} intercepted and crashed to the ground")
+        campaign_state.log(
+            f"[Drone] {drone.id} intercepted and crashed to the ground"
+        )
 
 
 # ============================================================
-#5. EnhancedEnemyAI (simplified core + drone extension)
+# 5. EnhancedEnemyAI (with simple learning)
 # ============================================================
 
 class EnhancedEnemyAI:
-    def __init__(self):
+    def __init__(self, coordinator: Optional["EnemySquadCoordinator"] = None):
         self.personality: str = "deceptive"  # "aggressive" / "defensive" / "deceptive"
         self.memory: List[Dict[str, Any]] = []
         self.memory_size: int = 5
+        self.coordinator = coordinator
+
+        # learning knobs
+        self.virtual_weapon_range_factor: float = 1.0
+        self.aggressiveness_bias: float = 0.0
+        self.preferred_distance_factor: float = 1.0
 
     def observe_outcome(self, outcome: Dict[str, Any]) -> None:
+        """
+        Store outcome and update coarse-grain parameters:
+        - if enemy wins quickly: increase aggressiveness and virtual weapon range
+        - if enemy loses: become more conservative (larger preferred distance, smaller range)
+        """
         self.memory.append(outcome)
         if len(self.memory) > self.memory_size:
             self.memory.pop(0)
+
+        winner = outcome.get("winner_team")
+        turns = outcome.get("turns", 0)
+
+        if winner == "enemy":
+            # successful pattern: push aggressiveness & range slightly up
+            speed_factor = 1.0 if turns == 0 else max(
+                0.5, min(1.5, 200.0 / (turns + 1))
+            )
+            self.virtual_weapon_range_factor = min(
+                1.6, self.virtual_weapon_range_factor + 0.05 * speed_factor
+            )
+            self.aggressiveness_bias = min(
+                0.5, self.aggressiveness_bias + 0.02 * speed_factor
+            )
+            self.preferred_distance_factor = max(
+                0.6, self.preferred_distance_factor - 0.02 * speed_factor
+            )
+        elif winner == "player":
+            # bad outcome: make enemy more cautious
+            self.virtual_weapon_range_factor = max(
+                0.8, self.virtual_weapon_range_factor - 0.05
+            )
+            self.aggressiveness_bias = max(-0.3, self.aggressiveness_bias - 0.03)
+            self.preferred_distance_factor = min(
+                1.4, self.preferred_distance_factor + 0.03
+            )
 
     def decide_personality(self) -> None:
         if not self.memory:
@@ -450,39 +510,78 @@ class EnhancedEnemyAI:
         else:
             self.personality = "deceptive"
 
+    def _virtual_weapon_range(self, drone: DroneUnit) -> float:
+        return drone.weapon_range * max(
+            0.6, min(1.6, self.virtual_weapon_range_factor)
+        )
+
     def recommend_drone_action(
         self, drone: DroneUnit, state: DroneScenarioState
     ) -> Tuple[Tuple[float, float, float], Optional[DroneUnit]]:
         if not drone.is_alive():
             return (0.0, 0.0, 0.0), None
 
-        enemies = state.get_team_drones("player" if drone.team == "enemy" else "enemy")
+        enemies = state.get_team_drones(
+            "player" if drone.team == "enemy" else "enemy"
+        )
         if not enemies:
             return (0.0, 0.0, 0.0), None
 
-        target = min(enemies, key=lambda e: drone.distance_to(e))
+        # Focus fire: shared focus target if available
+        focus_target = None
+        if self.coordinator is not None and drone.team == "enemy":
+            focus_target = self.coordinator.select_focus_target(state)
+
+        target = focus_target if focus_target is not None else min(
+            enemies, key=lambda e: drone.distance_to(e)
+        )
         dist = drone.distance_to(target)
 
+        # Personality-based base velocity
         if self.personality == "aggressive":
-            vx, vy, vz = self._vector_towards(drone, target, factor=1.0)
-            shoot = target if (dist <= drone.weapon_range and drone.ammo > 0) else None
+            vx, vy, vz = self._vector_towards(
+                drone, target, factor=1.0 + self.aggressiveness_bias
+            )
+            shoot = target if (
+                dist <= self._virtual_weapon_range(drone) and drone.ammo > 0
+            ) else None
+
         elif self.personality == "defensive":
-            desired = drone.weapon_range * 0.7
+            desired = (
+                self._virtual_weapon_range(drone)
+                * 0.7
+                * self.preferred_distance_factor
+            )
             if dist < desired:
                 vx, vy, vz = self._vector_away(drone, target, factor=1.0)
             else:
-                vx, vy, vz = self._vector_towards(drone, target, factor=0.5)
-            shoot = target if (dist <= drone.weapon_range * 0.9 and drone.ammo > 0) else None
+                vx, vy, vz = self._vector_towards(
+                    drone, target, factor=0.5 + self.aggressiveness_bias
+                )
+            shoot = target if (
+                dist <= self._virtual_weapon_range(drone) * 0.9 and drone.ammo > 0
+            ) else None
+
         else:  # deceptive
             if drone.hp < 40:
                 vx, vy, vz = self._vector_away(drone, target, factor=1.0)
             else:
                 vx, vy, vz = self._flank_vector(drone, target)
-            shoot = target if (dist <= drone.weapon_range * 0.8 and drone.ammo > 0) else None
+            shoot = target if (
+                dist <= self._virtual_weapon_range(drone) * 0.8 and drone.ammo > 0
+            ) else None
+
+        # Encirclement tweak: add lateral component suggested by coordinator
+        if self.coordinator is not None and drone.team == "enemy":
+            ex, ey = self.coordinator.encirclement_direction(drone, target)
+            vx += 0.4 * ex * drone.dyn_max_speed
+            vy += 0.4 * ey * drone.dyn_max_speed
 
         return (vx, vy, vz), shoot
 
-    def _vector_towards(self, drone: DroneUnit, target: DroneUnit, factor: float = 1.0):
+    def _vector_towards(
+        self, drone: DroneUnit, target: DroneUnit, factor: float = 1.0
+    ):
         dx, dy, dz = target.x - drone.x, target.y - drone.y, target.z - drone.z
         norm = math.sqrt(dx * dx + dy * dy + dz * dz) + 1e-6
         return (
@@ -491,7 +590,9 @@ class EnhancedEnemyAI:
             factor * dz / norm * drone.dyn_max_speed * drone.climb_speed_factor,
         )
 
-    def _vector_away(self, drone: DroneUnit, target: DroneUnit, factor: float = 1.0):
+    def _vector_away(
+        self, drone: DroneUnit, target: DroneUnit, factor: float = 1.0
+    ):
         dx, dy, dz = drone.x - target.x, drone.y - target.y, drone.z - target.z
         norm = math.sqrt(dx * dx + dy * dy + dz * dz) + 1e-6
         return (
@@ -520,7 +621,9 @@ class ChessSunTzuAI:
         self.map_width = map_width
         self.map_height = map_height
 
-    def positional_score_for_team(self, state: DroneScenarioState, team: str) -> float:
+    def positional_score_for_team(
+        self, state: DroneScenarioState, team: str
+    ) -> float:
         drones = state.get_team_drones(team)
         if not drones:
             return -999.0
@@ -530,13 +633,20 @@ class ChessSunTzuAI:
             dist_center = math.hypot(d.x - cx, d.y - cy)
             score += max(0.0, 50.0 - dist_center)
             score += d.hp * 0.5
-            margin = min(d.x, d.y, self.map_width - d.x, self.map_height - d.y)
+            margin = min(
+                d.x, d.y, self.map_width - d.x, self.map_height - d.y
+            )
             score += max(-30.0, margin - 30.0)
         return score
 
 
 class GoSunTzuAI:
-    def __init__(self, grid_size: int = 20, map_width: int = 100, map_height: int = 100):
+    def __init__(
+        self,
+        grid_size: int = 20,
+        map_width: int = 100,
+        map_height: int = 100
+    ):
         self.grid_size = grid_size
         self.map_width = map_width
         self.map_height = map_height
@@ -559,7 +669,9 @@ class GoSunTzuAI:
                     dist = math.hypot(d.x - cx, d.y - cy)
                     sigma = d.sensor_range
                     if sigma > 0:
-                        infl = math.exp(-(dist ** 2) / (2 * sigma ** 2)) * (1.0 + d.hp / 100.0)
+                        infl = math.exp(
+                            -(dist ** 2) / (2 * sigma ** 2)
+                        ) * (1.0 + d.hp / 100.0)
                         if d.team == "player":
                             player_infl += infl
                         else:
@@ -567,7 +679,9 @@ class GoSunTzuAI:
                 state.influence_grid_player[i][j] = player_infl
                 state.influence_grid_enemy[i][j] = enemy_infl
 
-    def detect_encirclement_zones(self, state: DroneScenarioState, target_team: str = "enemy") -> List[DroneUnit]:
+    def detect_encirclement_zones(
+        self, state: DroneScenarioState, target_team: str = "enemy"
+    ) -> List[DroneUnit]:
         if not state.influence_grid_player:
             self.compute_influence(state)
         sx = self.map_width / self.grid_size
@@ -599,12 +713,17 @@ class GoSunTzuAI:
 
 
 # ============================================================
-# 7. PlayerDroneController
+# 7. PlayerDroneController (tactical, player side)
 # ============================================================
 
 class PlayerDroneController:
-    def __init__(self, controls: Dict[str, Any]):
+    def __init__(
+        self,
+        controls: Dict[str, Any],
+        commander: Optional["SquadronCommander"] = None
+    ):
         self.controls = controls
+        self.commander = commander
 
     def _get_personality(self) -> str:
         return self.controls.get("player_personality", "defensive")
@@ -629,26 +748,46 @@ class PlayerDroneController:
         aggr = self._get_aggressiveness()
         pref_dist = self._get_pref_distance(drone.weapon_range * 0.8)
 
+        # Role-aware tuning from SquadronCommander
+        if self.commander is not None:
+            rp = self.commander.get_role_params(drone)
+            aggr *= rp.get("aggressiveness", 1.0)
+            pref_dist *= rp.get("pref_factor", 1.0)
+
         if personality == "aggressive":
             factor = 0.5 + aggr * 0.5
             vx, vy, vz = self._vector_towards(drone, target, factor=factor)
             shoot = target if (dist <= drone.weapon_range and drone.ammo > 0) else None
+
         elif personality == "defensive":
             if dist < pref_dist:
-                vx, vy, vz = self._vector_away(drone, target, factor=0.5 + (1.0 - aggr) * 0.5)
+                vx, vy, vz = self._vector_away(
+                    drone, target, factor=0.5 + (1.0 - aggr) * 0.5
+                )
             else:
-                vx, vy, vz = self._vector_towards(drone, target, factor=0.3 + aggr * 0.2)
-            shoot = target if (dist <= drone.weapon_range * 0.9 and drone.ammo > 0) else None
+                vx, vy, vz = self._vector_towards(
+                    drone, target, factor=0.3 + aggr * 0.2
+                )
+            shoot = target if (
+                dist <= drone.weapon_range * 0.9 and drone.ammo > 0
+            ) else None
+
         else:  # deceptive
             if drone.hp < 40:
-                vx, vy, vz = self._vector_away(drone, target, factor=0.7 + (1.0 - aggr) * 0.3)
+                vx, vy, vz = self._vector_away(
+                    drone, target, factor=0.7 + (1.0 - aggr) * 0.3
+                )
             else:
                 vx, vy, vz = self._flank_vector(drone, target)
-            shoot = target if (dist <= drone.weapon_range * 0.8 and drone.ammo > 0) else None
+            shoot = target if (
+                dist <= drone.weapon_range * 0.8 and drone.ammo > 0
+            ) else None
 
         return (vx, vy, vz), shoot
 
-    def _vector_towards(self, drone: DroneUnit, target: DroneUnit, factor: float = 1.0):
+    def _vector_towards(
+        self, drone: DroneUnit, target: DroneUnit, factor: float = 1.0
+    ):
         dx, dy, dz = target.x - drone.x, target.y - drone.y, target.z - drone.z
         norm = math.sqrt(dx * dx + dy * dy + dz * dz) + 1e-6
         return (
@@ -657,7 +796,9 @@ class PlayerDroneController:
             factor * dz / norm * drone.dyn_max_speed * drone.climb_speed_factor,
         )
 
-    def _vector_away(self, drone: DroneUnit, target: DroneUnit, factor: float = 1.0):
+    def _vector_away(
+        self, drone: DroneUnit, target: DroneUnit, factor: float = 1.0
+    ):
         dx, dy, dz = drone.x - target.x, drone.y - target.y, drone.z - target.z
         norm = math.sqrt(dx * dx + dy * dy + dz * dz) + 1e-6
         return (
@@ -678,11 +819,95 @@ class PlayerDroneController:
 
 
 # ============================================================
-# 8. Drone initialization helper (variable counts)
+# 8. SquadronCommander (strategic per-team role manager)
+# ============================================================
+
+class SquadronCommander:
+    """
+    Strategic layer per team.
+    - Assigns roles (SCOUT, SNIPER, TANK, DECOY)
+    - Provides role-aware parameters for lower-level controllers.
+    """
+    def __init__(self, team: str):
+        self.team = team
+        # virtual tuning knobs per role
+        self.role_params: Dict[DroneRole, Dict[str, float]] = {
+            DroneRole.SCOUT: {"aggressiveness": 0.7, "pref_factor": 1.2},
+            DroneRole.SNIPER: {"aggressiveness": 0.5, "pref_factor": 1.6},
+            DroneRole.TANK: {"aggressiveness": 0.9, "pref_factor": 0.6},
+            DroneRole.DECOY: {"aggressiveness": 0.8, "pref_factor": 1.0},
+        }
+
+    def assign_roles(self, drones: List[DroneUnit]) -> None:
+        team_drones = [d for d in drones if d.team == self.team]
+        if not team_drones:
+            return
+
+        n = len(team_drones)
+        # simple heuristic: first = TANK, last = SCOUT, middle = SNIPER/DECOY
+        for i, d in enumerate(sorted(team_drones, key=lambda x: x.id)):
+            if i == 0:
+                d.role = DroneRole.TANK
+            elif i == n - 1:
+                d.role = DroneRole.SCOUT
+            elif i % 2 == 0:
+                d.role = DroneRole.SNIPER
+            else:
+                d.role = DroneRole.DECOY
+
+    def get_role_params(self, drone: DroneUnit) -> Dict[str, float]:
+        return self.role_params.get(drone.role, self.role_params[DroneRole.SCOUT])
+
+
+# ============================================================
+# 9. EnemySquadCoordinator (focus fire & encirclement)
+# ============================================================
+
+class EnemySquadCoordinator:
+    """
+    Coordinates enemy drones:
+    - selects a primary focus target among player drones
+    - suggests encirclement directions using GoSunTzuAI influence
+    """
+    def __init__(self, go_ai: GoSunTzuAI):
+        self.go_ai = go_ai
+
+    def select_focus_target(
+        self, state: DroneScenarioState
+    ) -> Optional[DroneUnit]:
+        players = state.get_team_drones("player")
+        if not players:
+            return None
+        # prioritize low HP + close to center (easy to finish)
+        cx, cy = state.map_width / 2.0, state.map_height / 2.0
+
+        def score(d: DroneUnit) -> float:
+            return d.hp + 0.5 * math.hypot(d.x - cx, d.y - cy)
+
+        return min(players, key=score)
+
+    def encirclement_direction(
+        self, enemy: DroneUnit, target: DroneUnit
+    ) -> Tuple[float, float]:
+        """
+        Returns a lateral direction around the target to encourage encirclement.
+        Simple: perpendicular vector, oriented by enemy index relative to target.
+        """
+        dx, dy = target.x - enemy.x, target.y - enemy.y
+        norm = math.hypot(dx, dy) + 1e-6
+        fx, fy = -dy / norm, dx / norm
+        # pick side deterministically from IDs
+        sign = 1.0 if enemy.id < target.id else -1.0
+        return sign * fx, sign * fy
+
+
+# ============================================================
+# 10. Drone initialization helper (variable counts)
 # ============================================================
 
 def create_drones(num_blue: int, num_red: int) -> List[DroneUnit]:
-    """Creates num_blue player drones (left side) and num_red enemy drones (right side),
+    """
+    Creates num_blue player drones (left side) and num_red enemy drones (right side),
     spaced in Y and slightly in Z.
     """
     drones: List[DroneUnit] = []
@@ -741,13 +966,14 @@ def create_drones(num_blue: int, num_red: int) -> List[DroneUnit]:
 
 
 # ============================================================
-# 9. Collision avoidance helper
+# 11. Collision avoidance helper
 # ============================================================
 
 def apply_collision_avoidance(
     ds: DroneScenarioState, min_dist: float = 3.0, strength: float = 1.5
 ) -> Dict[str, Tuple[float, float, float]]:
-    """Simple collision avoidance:
+    """
+    Simple collision avoidance:
     - For each pair of alive drones closer than min_dist, apply a repulsive vector.
     - Returns a dict: extra_vel[drone_id] = (dvx, dvy, dvz)
     """
@@ -778,23 +1004,37 @@ def apply_collision_avoidance(
 
 
 # ============================================================
-# 10. Export shooting/battery/interception stats
+# 12. Export shooting/battery/interception stats
 # ============================================================
 
 def export_battle_stats(ds: DroneScenarioState, campaign_state: CampaignState) -> None:
-    distances_player = [e["distance"] for e in ds.shot_events if e["shooter_team"] == "player"]
-    distances_enemy = [e["distance"] for e in ds.shot_events if e["shooter_team"] == "enemy"]
+    distances_player = [
+        e["distance"] for e in ds.shot_events if e["shooter_team"] == "player"
+    ]
+    distances_enemy = [
+        e["distance"] for e in ds.shot_events if e["shooter_team"] == "enemy"
+    ]
 
-    hits_player = [e for e in ds.shot_events if e["shooter_team"] == "player" and e["hit"]]
-    hits_enemy = [e for e in ds.shot_events if e["shooter_team"] == "enemy" and e["hit"]]
+    hits_player = [
+        e for e in ds.shot_events
+        if e["shooter_team"] == "player" and e["hit"]
+    ]
+    hits_enemy = [
+        e for e in ds.shot_events
+        if e["shooter_team"] == "enemy" and e["hit"]
+    ]
 
-    total_player = len([e for e in ds.shot_events if e["shooter_team"] == "player"])
-    total_enemy = len([e for e in ds.shot_events if e["shooter_team"] == "enemy"])
+    total_player = len(
+        [e for e in ds.shot_events if e["shooter_team"] == "player"]
+    )
+    total_enemy = len(
+        [e for e in ds.shot_events if e["shooter_team"] == "enemy"]
+    )
 
     hit_rate_player = len(hits_player) / total_player if total_player > 0 else 0.0
     hit_rate_enemy = len(hits_enemy) / total_enemy if total_enemy > 0 else 0.0
 
-    # Average battery life (we're using the last snapshot)
+    # Average battery life (last snapshot)
     if ds.history:
         last_snap = ds.history[-1]
         final_batteries_player = [
@@ -818,8 +1058,8 @@ def export_battle_stats(ds: DroneScenarioState, campaign_state: CampaignState) -
         else 0.0
     )
 
-    interception_turns_player = []
-    interception_turns_enemy = []
+    interception_turns_player: List[int] = []
+    interception_turns_enemy: List[int] = []
 
     for d in ds.drones:
         if d.status == DroneStatus.INTERCEPTED:
@@ -846,17 +1086,19 @@ def export_battle_stats(ds: DroneScenarioState, campaign_state: CampaignState) -
     )
 
     campaign_state.log(
-        f"[Stats] Player hit rate={hit_rate_player:.2f}, Enemy hit rate={hit_rate_enemy:.2f}"
+        f"[Stats] Player hit rate={hit_rate_player:.2f}, "
+        f"Enemy hit rate={hit_rate_enemy:.2f}"
     )
     campaign_state.log(
-        f"[Stats] Avg battery P={avg_batt_player:.1f}, E={avg_batt_enemy:.1f}"
+        f"[Stats] Avg battery P={avg_batt_player:.1f}, "
+        f"E={avg_batt_enemy:.1f}"
     )
     campaign_state.log(
         f"[Stats] Avg turns before intercept P={avg_turn_intercept_player:.1f}, "
         f"E={avg_turn_intercept_enemy:.1f}"
     )
 
-    # Export CSV basique
+    # CSV export
     try:
         with open("shot_events.csv", "w", encoding="utf-8") as f:
             f.write("turn,shooter_id,team,target_id,hit,distance,damage\n")
@@ -867,11 +1109,13 @@ def export_battle_stats(ds: DroneScenarioState, campaign_state: CampaignState) -
                     f"{e['damage']:.1f}\n"
                 )
     except Exception as ex:
-        campaign_state.log(f"[Stats] Could not write shot_events.csv: {ex}")
+        campaign_state.log(
+            f"[Stats] Could not write shot_events.csv: {ex}"
+        )
 
 
 # ============================================================
-# 11. Main loop: run_drone_campaign
+# 13. Main loop: run_drone_campaign
 # ============================================================
 
 def run_drone_campaign(
@@ -892,10 +1136,29 @@ def run_drone_campaign(
     chess_ai = ChessSunTzuAI(map_width=ds.map_width, map_height=ds.map_height)
     go_ai = GoSunTzuAI(grid_size=20, map_width=ds.map_width, map_height=ds.map_height)
 
-    enemy_ai: EnhancedEnemyAI = campaign_state.enemy_ai
-    player_ai = PlayerDroneController(campaign_state.player_controls)
+    # Strategic commanders
+    enemy_commander = SquadronCommander(team="enemy")
+    player_commander = SquadronCommander(team="player")
+    enemy_commander.assign_roles(ds.drones)
+    player_commander.assign_roles(ds.drones)
 
-    # Volume & Météo
+    # Enemy coordination
+    coordinator = EnemySquadCoordinator(go_ai)
+
+    # Enemy AI (may persist across battles)
+    enemy_ai: EnhancedEnemyAI = campaign_state.enemy_ai
+    if enemy_ai is None:
+        enemy_ai = EnhancedEnemyAI(coordinator=coordinator)
+        campaign_state.enemy_ai = enemy_ai
+    else:
+        enemy_ai.coordinator = coordinator
+
+    player_ai = PlayerDroneController(
+        campaign_state.player_controls,
+        commander=player_commander,
+    )
+
+    # Volume & Weather
     constraints = VolumeConstraints()
 
     weather = Weather()
@@ -911,7 +1174,7 @@ def run_drone_campaign(
         f"=== Drone Campaign: {num_red} enemy drones vs {num_blue} player drones ==="
     )
 
-    dt = 1.0  # pas de temps
+    dt = 1.0  # time step
 
     while ds.turn_index < ds.max_turns:
         ds.turn_index += 1
@@ -942,11 +1205,14 @@ def run_drone_campaign(
         encircled_player = go_ai.detect_encirclement_zones(ds, target_team="player")
 
         campaign_state.log(
-            f"[DroneChess] enemy_pos={chess_enemy:.1f}, player_pos={chess_player:.1f}"
+            f"[DroneChess] enemy_pos={chess_enemy:.1f}, "
+            f"player_pos={chess_player:.1f}"
         )
         if encircled_player:
             names = ", ".join(d.id for d in encircled_player)
-            campaign_state.log(f"[DroneGo] Player drones encircled: {names}")
+            campaign_state.log(
+                f"[DroneGo] Player drones encircled: {names}"
+            )
 
         planned_moves: Dict[str, Tuple[float, float, float]] = {}
         planned_shots: List[Tuple[DroneUnit, DroneUnit]] = []
@@ -964,7 +1230,9 @@ def run_drone_campaign(
             if target is not None:
                 planned_shots.append((d, target))
 
-        extra_vel = apply_collision_avoidance(ds, min_dist=3.0, strength=1.5)
+        extra_vel = apply_collision_avoidance(
+            ds, min_dist=3.0, strength=1.5
+        )
 
         # Movement + dynamics + weather + volume + battery
         for d in ds.drones:
@@ -985,7 +1253,7 @@ def run_drone_campaign(
             apply_volume_constraints(d, constraints)
             update_battery(d, weather, dt)
 
-         # Firing phase + enregistrement stats
+        # Firing phase + stats
         for shooter, target in planned_shots:
             if not shooter.is_alive() or not target.is_alive():
                 continue
@@ -1010,7 +1278,8 @@ def run_drone_campaign(
                 damage = dmg
                 target.hp -= dmg
                 campaign_state.log(
-                    f"[Drone] {shooter.id} hits {target.id} for {dmg:.1f} HP (dist={dist:.1f})"
+                    f"[Drone] {shooter.id} hits {target.id} for "
+                    f"{dmg:.1f} HP (dist={dist:.1f})"
                 )
                 if target.hp <= 0 and target.status == DroneStatus.ACTIVE:
                     drone_intercepted(target, campaign_state)
@@ -1043,7 +1312,7 @@ def run_drone_campaign(
 
 
 # ============================================================
-# 12. Visualisations
+# 14. Visualisations
 # ============================================================
 
 def visualize_drone_battle_3d(campaign_state: CampaignState) -> None:
@@ -1159,7 +1428,9 @@ def visualize_drone_battle_3d(campaign_state: CampaignState) -> None:
                         ehz.append(z)
 
         # shots in this round (turn_index starts at 1)
-        turn_shots = [e for e in ds.shot_events if e["turn"] == frame + 1]
+        turn_shots = [
+            e for e in ds.shot_events if e["turn"] == frame + 1
+        ]
         for e in turn_shots:
             tid = e["target_id"]
             if frame < len(xs[tid]):
@@ -1231,13 +1502,13 @@ def visualize_drone_2d_tracks(campaign_state: CampaignState) -> None:
             ax_xy.plot(xs[d_id], ys[d_id], color="blue", alpha=0.7)
         else:
             ax_xy.plot(xs[d_id], ys[d_id], color="red", alpha=0.7)
-    ax_xy.set_title("Trajectoires au sol (X–Y)")
+    ax_xy.set_title("Ground trajectories (X–Y)")
     ax_xy.set_xlabel("X")
     ax_xy.set_ylabel("Y")
     ax_xy.set_xlim(0, ds.map_width)
     ax_xy.set_ylim(0, ds.map_height)
 
-    # altitude vs temps (on trace quelques drones)
+    # altitude vs time (plot a few drones)
     max_to_plot = min(6, len(drone_ids))
     for d_id in drone_ids[:max_to_plot]:
         t_axis = list(range(turns))
@@ -1245,7 +1516,7 @@ def visualize_drone_2d_tracks(campaign_state: CampaignState) -> None:
             ax_z.plot(t_axis, zs[d_id], label=d_id, color="blue", alpha=0.7)
         else:
             ax_z.plot(t_axis, zs[d_id], label=d_id, color="red", alpha=0.7)
-    ax_z.set_title("Altitude vs temps")
+    ax_z.set_title("Altitude vs time")
     ax_z.set_xlabel("Turn")
     ax_z.set_ylabel("Altitude z")
     ax_z.legend()
@@ -1254,8 +1525,10 @@ def visualize_drone_2d_tracks(campaign_state: CampaignState) -> None:
     plt.show()
 
 
-def visualize_influence_heatmaps(campaign_state: CampaignState,
-                                 turns_to_show: Optional[List[int]] = None) -> None:
+def visualize_influence_heatmaps(
+    campaign_state: CampaignState,
+    turns_to_show: Optional[List[int]] = None
+) -> None:
     ds = campaign_state.drone_scenario
     if ds is None or not ds.history:
         print("No drone scenario history to visualize.")
@@ -1273,12 +1546,17 @@ def visualize_influence_heatmaps(campaign_state: CampaignState,
                 turns_to_show = [0, T // 2, T - 1]
 
     grid_size = len(ds.influence_grid_player) if ds.influence_grid_player else 20
-    go_ai = GoSunTzuAI(grid_size=grid_size,
-                       map_width=ds.map_width,
-                       map_height=ds.map_height)
+    go_ai = GoSunTzuAI(
+        grid_size=grid_size,
+        map_width=ds.map_width,
+        map_height=ds.map_height
+    )
 
-    fig, axes = plt.subplots(len(turns_to_show), 2,
-                             figsize=(8, 3 * len(turns_to_show)))
+    fig, axes = plt.subplots(
+        len(turns_to_show),
+        2,
+        figsize=(8, 3 * len(turns_to_show))
+    )
     if len(turns_to_show) == 1:
         axes = np.array([axes])
 
@@ -1295,10 +1573,16 @@ def visualize_influence_heatmaps(campaign_state: CampaignState,
 
         ax_p = axes[idx, 0]
         ax_e = axes[idx, 1]
-        im0 = ax_p.imshow(np.array(ds.influence_grid_player).T,
-                          origin="lower", cmap="Blues")
-        im1 = ax_e.imshow(np.array(ds.influence_grid_enemy).T,
-                          origin="lower", cmap="Reds")
+        im0 = ax_p.imshow(
+            np.array(ds.influence_grid_player).T,
+            origin="lower",
+            cmap="Blues",
+        )
+        im1 = ax_e.imshow(
+            np.array(ds.influence_grid_enemy).T,
+            origin="lower",
+            cmap="Reds",
+        )
         ax_p.set_title(f"Player influence (turn {snap_idx})")
         ax_e.set_title(f"Enemy influence (turn {snap_idx})")
         fig.colorbar(im0, ax=ax_p, fraction=0.046, pad=0.04)
@@ -1313,14 +1597,14 @@ def visualize_influence_heatmaps(campaign_state: CampaignState,
 
 
 # ============================================================
-# 13. Entry point
+# 15. Entry point
 # ============================================================
 
 if __name__ == "__main__":
     cs = CampaignState()
     cs.enemy_ai = EnhancedEnemyAI()
-    # cs.enemy_ai.personality = "aggressive"
-    cs.enemy_ai.personality = "defensive"
+    cs.enemy_ai.personality = "aggressive"
+    #cs.enemy_ai.personality = "defensive"
 
     cs.player_controls = {
         "player_personality": "defensive",
