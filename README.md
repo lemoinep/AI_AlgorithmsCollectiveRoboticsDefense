@@ -234,6 +234,25 @@ Tactically, this creates a new strategic dimension in the simulation: drones equ
 
 ---
 
+#### SimuDronesCampaignLemAI_Level3.py 
+
+Improving the previous simulation to effectively utilize the electromagnetic pulse weapon with drones. 
+
+The idea is that since the **EMP effect decreases proportionally to \(1/r\)**, the drone formation should be optimized to **maximize its impact on enemy targets while keeping friendly drones safe**. Because the electromagnetic pulse radiates almost evenly in all directions, forming a **full circle around the target** is risky — some friendly drones would be exposed to fields strong enough to disrupt them due to positioning errors or secondary lobes.  
+
+An **arc formation**, placed on the side **opposite the emitter** or slightly beyond the **danger zone**, allows multiple drones to **direct fire effectively** at the disabled enemies without entering the EMP’s effective radius. The tactic involves defining two distances:  
+
+- An effective radius R_eff, where the EMP can neutralize enemy drones,  
+- And a safety radius R_safe > R_eff, beyond which friendly drones remain unaffected.  
+
+A specialized drone such as a **THOR** or **SPEAR** unit moves close enough so that the enemy group lies within R_eff, while the rest stay along the **arc** at or beyond R_safe.  
+
+The EMP is triggered only when **enough enemies fall within the effective zone** and **no friendly drones are inside the safety radius**.  
+
+For the next step, I will add a new weapon: a drone-mounted system that sprays liquid nitrogen onto enemy drones to induce technical failures. Because, liquid nitrogen itself is non-conductive, so it's not an "electrical" weapon but rather a mechanical/thermal one: rapid cooling can make plastics brittle, crack fragile parts, or cause certain components to malfunction, especially if sensitive areas are targeted (propellers, joints, exposed sensors, batteries). Therefore, it should be modeled as a short-range, cone-shaped weapon...
+
+---
+
 ## For more information
 
 <img src="Images/Z20260122_000001.jpg" width="100%" />
