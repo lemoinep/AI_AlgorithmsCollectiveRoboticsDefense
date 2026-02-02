@@ -251,7 +251,205 @@ The EMP is triggered only when **enough enemies fall within the effective zone**
 
 For the next step, I will add a new weapon: a drone-mounted system that sprays liquid nitrogen onto enemy drones to induce technical failures. Because, liquid nitrogen itself is non-conductive, so it's not an "electrical" weapon but rather a mechanical/thermal one: rapid cooling can make plastics brittle, crack fragile parts, or cause certain components to malfunction, especially if sensitive areas are targeted (propellers, joints, exposed sensors, batteries). Therefore, it should be modeled as a short-range, cone-shaped weapon...
 
+
+
 ---
+
+##### Conceptual Diagram: Program Structure and Enemy AI Flow
+
+```
++---------------------------------------------------------------------------+
+| SimuDronesCampaignLemAI_Level3.py                                         |
+| 3D drone battle + EMP weapons + arc formation tactics + visualization     |
++-------------------------------+-------------------------------------------+
+                                |
+                                v
++-------------------------------+-------------------------------------------+
+| CONFIG                                                                    |
+| - Map, max turns, number of drones                                        |
+| - Drone dynamics (speed, accel, climb, yaw)                               |
+| - Volume constraints (altitude, NFZ)                                      |
+| - Weather presets (wind, turbulence, battery factors)                     |
+| - Weapon settings (kinetic, EMP, ranges, cooldowns)                       |
+| - Formation parameters (R_eff, R_safe, arc geometry)                      |
+| - Visualization / logging options                                         |
++-------------------------------+-------------------------------------------+
+                                |
+                                v
++-------------------------------+-------------------------------------------+
+| Data & State Classes                                                      |
+| - DroneUnit                                                               |
+|   (3D pose, HP, battery, ammo, EMP status, team, role)                    |
+| - DroneScenarioState                                                      |
+|   (all drones, turn index, history, influence grids,                      |
+|    shot_events, emp_events)                                               |
+| - CampaignState                                                           |
+|   (global logs, weather label, enemy_ai, player_controls,                 |
+|    formation_planner, formation_targets)                                  |
++-------------------------------+-------------------------------------------+
+                                |
+                                v
++-------------------------------+-------------------------------------------+
+| AI Components                                                             |
+| - EnhancedEnemyAI                                                         |
+|   (personality, memory, EMP-aware recommend_drone_action)                 |
+| - PlayerDroneController                                                   |
+|   (aggressiveness, preferred distance, EMP usage policy)                  |
+| - FormationPlannerEMP                                                     |
+|   - Detect clusters of enemy drones                                       |
+|   - Select EMP carrier (THOR/SPEAR-like drone)                            |
+|   - Compute arc positions at R_safe                                       |
+|   - Assign roles: EMP_EMITTER vs ARC_SHOOTER                              |
+| - ChessSunTzuAI                                                           |
+|   (positional evaluation per team)                                        |
+| - GoSunTzuAI                                                              |
+|   (influence grids, encirclement / density analysis)                      |
++-------------------------------+-------------------------------------------+
+                                |
+                                v
++-------------------------------+-------------------------------------------+
+| Environment, Physics & Weapons                                            |
+| - VolumeConstraints (altitude limits, NFZ)                                |
+| - Weather model (wind, turbulence, battery_factor)                        |
+| - update_drone_dynamics (inertia, accel, yaw, climb)                      |
+| - apply_weather, apply_volume_constraints, update_battery                 |
+| - apply_collision_avoidance                                               |
+| - Weapon handling:                                                        |
+|   - Kinetic fire (hit/miss, damage, interception)                         |
+|   - EMP propagation (1/r attenuation, R_eff, R_safe checks)               |
+|   - Apply EMP effects (HP loss, battery drain, temporary disable)         |
++-------------------------------+-------------------------------------------+
+                                |
+                                v
++-------------------------------+-------------------------------------------+
+| Main Simulation Loop: run_drone_campaign_level3()                         |
+| 1. Check termination: is_battle_over                                      |
+| 2. Evaluate global position (ChessSunTzuAI, GoSunTzuAI)                   |
+| 3. Formation planning (FormationPlannerEMP)                               |
+|    - Identify enemy clusters                                              |
+|    - Update roles and desired arc around targets                          |
+| 4. For each drone:                                                        |
+|    - If enemy: EnhancedEnemyAI                                            |
+|      (uses EMP awareness + personality)                                   |
+|    - If player: PlayerDroneController                                     |
+|      (tactics + EMP policy + formation hints)                             |
+| 5. Apply collision avoidance                                              |
+| 6. Integrate dynamics + environment                                       |
+| 7. Weapons phase:                                                         |
+|    - Resolve kinetic fire                                                 |
+|    - Evaluate EMP trigger conditions                                      |
+|      (enemies within R_eff, no friend in R_safe)                          |
+|    - Apply EMP effects, log emp_events                                    |
+| 8. Snapshot state to history                                              |
++-------------------------------+-------------------------------------------+
+                                |
+                                v
++-------------------------------+-------------------------------------------+
+| Statistics & Visualization                                                |
+| - export_battle_stats_level3()                                            |
+|   (hit rates, distances, battery use, interception times, EMP usage)      |
+| - visualize_drone_battle_3d_level3()                                      |
+| - visualize_drone_2d_tracks_level3()                                      |
+| - visualize_influence_heatmaps_level3()                                   |
+| - Optional overlays for R_eff, R_safe and arc positions                   |
++--------------------------------------------------------------------------+
+
+```
+
+---
+
+##### Enemy AI Decision Flow
+
+```
++-------------------------------------------------------------------+
+| EnhancedEnemyAI (Level 3)                                         |
+| Role: tactical controller for red drones with EMP/formation logic |
++---------------------------+---------------------------------------+
+                            |
+                            v
++-------------------------------------------------------------------+
+| 1. Update personality after each battle                           |
+|   observe_outcome()                                               |
+|   - Append battle result to memory (limited size)                 |
+|   decide_personality()                                            |
+|   - Compute win rate                                              |
+|   - If win_rate > 0.7  -> AGGRESSIVE                              |
+|   - If win_rate < 0.3  -> DEFENSIVE                               |
+|   - Else               -> DECEPTIVE                               |
++---------------------------+---------------------------------------+
+                            |
+                            v
++---------------------------+---------------------------------------+
+| 2. Per-turn decision for each enemy drone                         |
+|   recommend_drone_action_level3()                                 |
++---------------------------+---------------------------------------+
+                            |
+                            v
++---------------------------+---------------------------------------+
+| 2.1 Perception                                                    |
+|   - Read DroneScenarioState                                       |
+|   - Collect visible blue drones                                   |
+|   - Check local cluster density around candidate EMP targets      |
+|   - If no blue drones:                                            |
+|       return zero velocity, no shot, no EMP                       |
++---------------------------+---------------------------------------+
+                            |
+                            v
++---------------------------+--------------------------------------+
+| 2.2 Target and role selection                                    |
+|   - Choose main kinetic target (closest or tactically relevant)  |
+|   - If drone is EMP carrier:                                     |
+|       * Evaluate cluster size within R_eff                       |
+|       * Check distance to cluster center                         |
+|       * Mark candidate_EMP_trigger (bool)                        |
+|   - Else (non-EMP drone):                                        |
+|       * Use formation hints (arc position at R_safe)             |
++---------------------------+--------------------------------------+
+                            |
+                            v
++--------------------------------------------------------------------+
+| 2.3 Behavior by personality and role                               |
++---------------------------+-----------------+----------------------+
+| aggressive                | defensive       | deceptive            |
+| - EMP carrier:            | - EMP carrier:  | - EMP carrier:       |
+|   * Rush toward cluster   |   * Stay just   |   * Fake approaches  |
+|     center to reach       |     outside     |     and lateral      |
+|     R_eff quickly         |     R_safe      |     moves before     |
+|   * If cluster >= N_min   |   * Trigger EMP |     entering R_eff   |
+|     and no friend in      |     only when   |   * Trigger EMP      |
+|     R_safe: trigger EMP   |     clearly safe|     opportunistically|
+| - Non-EMP:                | - Non-EMP:      | - Non-EMP:           |
+|   * Full-speed vector     |   * Keep stand- |   * Flanking arcs    |
+|     _vector_towards()     |     off at      |     and irregular    |
+|   * If in weapon range    |     R_safe      |     spacing on arc   |
+|     and ammo>0: fire      |   * Prioritize  |   * More             |
+|                           |     survival    |     conservative     |
+|                           |                 |     fire thresholds  |
++---------------------------+-----------------+----------------------+
+                            |
+                            v
++---------------------------+--------------------------------------+
+| 2.4 EMP trigger logic (EMP carrier only)                         |
+|   - If candidate_EMP_trigger is true                             |
+|   - And enemies_in_R_eff >= N_min                                |
+|   - And no friendly drone inside R_safe                          |
+|   - And EMP not on cooldown:                                     |
+|       * fire_emp_pulse()                                         |
+|       * Mark affected drones as EMP-disabled for k turns         |
++---------------------------+--------------------------------------+
+                            |
+                            v
++---------------------------+--------------------------------------+
+| 2.5 Output                                                       |
+|   - desired velocity (vx, vy, vz) within dynamics limits         |
+|   - optional kinetic target to fire at                           |
+|   - optional EMP trigger flag (for EMP carrier)                  |
++------------------------------------------------------------------+
+
+```
+
+---
+
 
 ## For more information
 
