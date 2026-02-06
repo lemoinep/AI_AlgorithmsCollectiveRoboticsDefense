@@ -450,6 +450,148 @@ For the next step, I will add a new weapon: a drone-mounted system that sprays l
 
 ---
 
+#### SimuDronesCampaignLemAI_Level4.py 
+
+SimuDronesCampaignLemAI_Level4.py extends the previous Level 3 simulator with an additional LN2 (liquid nitrogen) cone weapon, richer volume constraints, and more detailed weather‑driven battery and dynamics modeling. It introduces a learning‑based EnhancedEnemyAI combined with an EnemySquadCoordinator and SquadronCommander, using Chess/Go‑style influence maps, role assignment, and encirclement/EMP arc tactics to coordinate enemy drones at squad level.
+
+LN2 is modeled as a short‑range, forward cone “spray” weapon used opportunistically when enemies are directly in front of the shooter and close enough. Strategically, it complements EMP and kinetic fire by punishing clustered, frontal engagements: drones equipped with LN2 wait for targets inside a narrow angular cone and within 8 m, then apply HP damage, a temporary technical disable, and a strong battery penalty to quickly degrade nearby threats.
+
+---
+
+##### Conceptual Diagram: Program Structure and Enemy AI Flow
+
+```
++----------------------------------------------------------------+
+| SimuDronesCampaignLemAI_Level4.py                              |
+| 3D drone battle + EMP/LN2 weapons + strategic/learning AI      |
++-------------------------------+--------------------------------+
+                                |
+                                v
++-------------------------------+--------------------------------+
+| CONFIG                                                         |
+| - Scenario (map, turns, #drones)                               |
+| - Drone dynamics (speed, accel, yaw)                           |
+| - Volume constraints (altitude ceilings, NFZ cylinders)        |
+| - Weather presets (wind, turbulence, battery factor)           |
+| - EMP / LN2 weapon parameters and cooldowns                    |
+| - Visualization / heatmap turns                                |
++-------------------------------+--------------------------------+
+                                |
+                                v
++-------------------------------+--------------------------------+
+| CORE STATE OBJECTS                                             |
+| - DroneUnit: kinematics, HP, battery, ammo, role, weapons      |
+| - DroneScenarioState: drones, grids, history, events           |
+| - CampaignState: turn, logs, weather, enemy AI, controls       |
++-------------------------------+--------------------------------+
+                                |
+                                v
++-------------------------------+--------------------------------+
+| ENVIRONMENT & PHYSICS LAYER                                    |
+| - VolumeConstraints: altitude limits, NFZ handling             |
+| - Weather: wind drift, turbulence, battery drain factor        |
+| - Dynamics: accel limits, yaw update, position integration     |
+| - Battery model: usage vs speed and climb, degradation         |
++-------------------------------+--------------------------------+
+                                |
+                                v
++-------------------------------+--------------------------------+
+| STRATEGIC & TACTICAL AI LAYER                                  |
+| - ChessSunTzuAI: positional scoring                            |
+| - GoSunTzuAI: influence grids, encirclement zones              |
+| - SquadronCommander: roles and team parameters                 |
+| - PlayerDroneController: player tactics per drone              |
+| - EnemySquadCoordinator: focus fire, arcs, encirclement        |
+| - EnhancedEnemyAI: personality + learning                      |
++-------------------------------+--------------------------------+
+                                |
+                                v
++-------------------------------+--------------------------------+
+| WEAPONS & EFFECTS                                              |
+| - Direct fire: kinetic interception                            |
+| - EMP/IEM: AoE disable, HP/battery damage, cooldown            |
+| - LN2: short-range cone, temporary disable, penalties          |
++-------------------------------+--------------------------------+
+                                |
+                                v
++-------------------------------+--------------------------------+
+| MAIN SIMULATION LOOP (PER TURN)                                |
+| - Increment turn and campaign state                            |
+| - For each drone: query Player / Enemy AI                      |
+| - Apply dynamics, constraints, weather, battery                |
+| - Resolve weapons and status changes                           |
+| - Update influence grids, logs, history                        |
+| - Check victory or timeout                                     |
++----------------------------------------------------------------+
+
+```
+
+---
+
+##### Enemy AI Decision Flow
+
+```
++----------------------------------------------------------------+
+| EnhancedEnemyAI (per enemy drone, per turn)                    |
++-------------------------------+--------------------------------+
+                                |
+                                v
++-------------------------------+--------------------------------+
+| 1. AVAILABILITY CHECK                                          |
+| - If drone destroyed, disabled or out of battery:              |
+|     -> return zero velocity and no fire action                 |
+| - Else: build list of valid player targets                     |
++-------------------------------+--------------------------------+
+                                |
+                                v
++-------------------------------+--------------------------------+
+| 2. TARGET & COORDINATION                                       |
+| - Ask EnemySquadCoordinator for shared focus target            |
+| - If none: select closest player drone as target               |
+| - Compute distance and relative direction to target            |
++-------------------------------+--------------------------------+
+                                |
+                                v
++-------------------------------+--------------------------------+
+| 3. PERSONALITY-BASED MOTION                                    |
+| - Personality: AGGRESSIVE / DEFENSIVE / DECEPTIVE              |
+| - Aggressive: move toward target, close to virtual range       |
+| - Defensive: keep preferred distance, back off if too close    |
+| - Deceptive: flank or evade depending on remaining HP          |
++-------------------------------+--------------------------------+
+                                |
+                                v
++-------------------------------+--------------------------------+
+| 4. COORDINATED MANEUVERS                                       |
+| - Use Go influence map for encirclement direction              |
+| - Add lateral / arc component to velocity                      |
+| - For EMP: move to safe arc points around player clusters      |
++-------------------------------+--------------------------------+
+                                |
+                                v
++-------------------------------+--------------------------------+
+| 5. WEAPON DECISION                                             |
+| - Direct fire: if inside virtual weapon range                  |
+| - EMP: if enough player drones in EMP radius and no cooldown   |
+| - LN2: if target in short-range cone and cooldown ready        |
+| -> Output: desired velocity + optional fire / EMP / LN2 action |
++-------------------------------+--------------------------------+
+                                |
+                                v
++-------------------------------+--------------------------------+
+| 6. POST-BATTLE LEARNING (CAMPAIGN)                             |
+| - After battle: store outcome in AI memory                     |
+| - Tune aggressiveness, range, preferred distance               |
+| - Recompute personality for next battles                       |
++----------------------------------------------------------------+
+
+
+```
+
+---
+
+---
+
 
 ## For more information
 
