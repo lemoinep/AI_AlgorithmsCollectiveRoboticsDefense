@@ -1,6 +1,6 @@
 # Author(s): Dr. Patrick Lemoine
 # Simulation: Collective Robotics Defense with AI and EMP weapons arranged in a circular arc
-# + LN2 (liquid nitrogen) Weapon.
+# + LN2 (liquid nitrogen) Weapon + Kamikaze drones
 # For now we will use a swarm of small drones and later we will use AI robot agents
 # which will have different characteristics and will be deployed by a strategic AI.
 
@@ -30,11 +30,11 @@ import numpy as np
 
 CONFIG = {
     # --- Scenario ---
-    "NUM_BLUE_DRONES": 10,
-    "NUM_RED_DRONES": 10,
+    "NUM_BLUE_DRONES": 100,
+    "NUM_RED_DRONES": 100,
     "MAX_TURNS": 50000,
-    "MAP_WIDTH": 100,
-    "MAP_HEIGHT": 100,
+    "MAP_WIDTH": 500,
+    "MAP_HEIGHT": 500,
 
     # --- EMP / IEM weapons (SPEAR / THOR) ---
     "ENABLE_EMP_WEAPONS": True,
@@ -56,6 +56,13 @@ CONFIG = {
     "LN2_BATTERY_PENALTY": 150.0,      # battery impact / stress
     "LN2_PROB_PLAYER": 0.3,            # probability a blue drone has LN2 module
     "LN2_PROB_ENEMY": 0.2,             # probability a red drone has LN2 module
+    
+    # --- Kamikaze drones ---
+    "ENABLE_KAMIKAZE_WEAPON": True,
+    "KAMIKAZE_PROB_PLAYER": 0.2,
+    "KAMIKAZE_PROB_ENEMY": 0.2,
+    "KAMIKAZE_DAMAGE_HP": 100.0,
+    "KAMIKAZE_TRIGGER_RADIUS": 3.0,
 
     # --- Drones ---
     "PLAYER_MAX_SPEED": 20.0,
@@ -137,6 +144,7 @@ class DroneRole(Enum):
     SNIPER = "SNIPER"  # long-range fire, keeps distance
     TANK = "TANK"     # front line, closes distance, soaks damage
     DECOY = "DECOY"   # draws fire, baits encirclement
+    KAMIKAZE = "KAMIKAZE"  # sacrificial attack on high-value targets
 
 
 @dataclass
@@ -194,6 +202,12 @@ class DroneUnit:
     has_ln2: bool = False
     ln2_cooldown: int = 0
     ln2_disabled_turns: int = 0
+    
+    # --- Kamikaze module (sacrificial explosive attack) ---
+    is_kamikaze: bool = False
+    kamikaze_armed: bool = False
+    kamikaze_damage_hp: float = 100.0
+    kamikaze_trigger_radius: float = 3.0
     
     def is_technically_available(self) -> bool:
        """Not destroyed, not EMP-disabled, not LN2-disabled."""
@@ -291,8 +305,11 @@ def compute_centroid(drones: List[DroneUnit]) -> Optional[Tuple[float, float, fl
 @dataclass
 class CampaignState:
     """Minimal campaign state compatible with the drone scenario."""
-
     turn: int = 0
+    total_player_losses: int = 0
+    total_enemy_losses: int = 0
+    total_kamikaze_used: int = 0
+    total_kamikaze_kills: int = 0
     weather: str = "CLEAR"
     logs: List[str] = field(default_factory=list)
 
@@ -508,6 +525,12 @@ def drone_intercepted(
     drone.status = DroneStatus.INTERCEPTED
     drone.z = 0.0  # on the ground
     drone.vx = drone.vy = drone.vz = 0.0
+    
+    if campaign_state is not None:
+        if drone.team == "player":
+            campaign_state.total_player_losses += 1
+        else:
+            campaign_state.total_enemy_losses += 1
 
     if campaign_state is not None:
         campaign_state.log(
@@ -598,6 +621,10 @@ class EnhancedEnemyAI:
         )
         if not enemies:
             return (0.0, 0.0, 0.0), None
+        
+        # Kamikaze-specific behavior
+        if drone.role == DroneRole.KAMIKAZE and drone.is_kamikaze:
+            return self._kamikaze_action(drone, state)
 
         # Focus fire: shared focus target if available
         focus_target = None
@@ -653,6 +680,45 @@ class EnhancedEnemyAI:
             vy += 0.4 * ey * drone.dyn_max_speed
 
         return (vx, vy, vz), shoot
+
+    def _kamikaze_action(
+        self, drone: DroneUnit, state: DroneScenarioState
+    ) -> Tuple[Tuple[float, float, float], Optional[DroneUnit]]:
+        enemies = state.get_team_effective_drones(
+            "player" if drone.team == "enemy" else "enemy"
+        )
+        target = min(enemies, key=lambda e: drone.distance_to(e))
+        dist = drone.distance_to(target)
+
+        low_own = (drone.hp < CONFIG["LOW_HP_THRESHOLD"]) or (drone.battery_level < 0.2)
+        high_value_target = (
+            target.role in (DroneRole.SNIPER, DroneRole.TANK)
+            or target.hp > 40.0
+        )
+
+        # personality modulates how easily we accept a sacrificial trade
+        if self.personality == "aggressive":
+            threshold = 0.6
+        elif self.personality == "defensive":
+            threshold = 1.2
+        else:  # deceptive
+            threshold = 0.9
+
+        # base decision: attack if we are weak OR target is very high value
+        decision_score = 0.0
+        if low_own:
+            decision_score += 1.0
+        if high_value_target:
+            decision_score += 1.0
+
+        if decision_score >= threshold:
+            vx, vy, vz = self._vector_towards(drone, target, factor=1.0)
+        else:
+            vx, vy, vz = self._flank_vector(drone, target)
+
+        shoot = None
+        return (vx, vy, vz), shoot
+
 
     def _vector_towards(
         self, drone: DroneUnit, target: DroneUnit, factor: float = 1.0
@@ -835,6 +901,10 @@ class PlayerDroneController:
         enemies = state.get_team_effective_drones("enemy")
         if not drone.is_alive() or not enemies:
             return (0.0, 0.0, 0.0), None
+        
+        # Kamikaze-specific behavior (sacrificial attack)
+        if drone.role == DroneRole.KAMIKAZE and drone.is_kamikaze:
+            return self._kamikaze_action(drone, state)
 
         target = min(enemies, key=lambda e: drone.distance_to(e))
         dist = drone.distance_to(target)
@@ -880,6 +950,46 @@ class PlayerDroneController:
             ) else None
 
         return (vx, vy, vz), shoot
+    
+    def _kamikaze_action(
+        self, drone: DroneUnit, state: DroneScenarioState
+    ) -> Tuple[Tuple[float, float, float], Optional[DroneUnit]]:
+        """
+        Sun Tzu-inspired kamikaze logic:
+        - If the drone is already heavily damaged or low on battery,
+          it accepts an unfavorable exchange to remove a high-value target.
+        - Otherwise, it approaches and flanks, waiting for a better moment.
+        """
+        enemies = state.get_team_effective_drones("enemy")
+        target = min(enemies, key=lambda e: drone.distance_to(e))
+        dist = drone.distance_to(target)
+
+        # own weakness: when we are already "lost", we become very aggressive
+        low_own = (drone.hp < CONFIG["LOW_HP_THRESHOLD"]) or (drone.battery_level < 0.2)
+
+        # high-value target: SNIPER / TANK or high HP
+        high_value_target = (
+            target.role in (DroneRole.SNIPER, DroneRole.TANK)
+            or target.hp > 40.0
+        )
+
+        # Optional: check local influence to avoid wasting kamikaze
+        go_ai = None
+        if self.commander is not None:
+            # commander may expose go_ai later, kept simple for now
+            pass
+
+        if low_own and high_value_target:
+            # "If you must perish, strike at the enemy's strength"
+            vx, vy, vz = self._vector_towards(drone, target, factor=1.0)
+        else:
+            # wait for better trade: flanking, probing defenses
+            vx, vy, vz = self._flank_vector(drone, target)
+
+        # no standard shooting: the body is the weapon
+        shoot = None
+        return (vx, vy, vz), shoot
+    
 
     def _vector_towards(
         self, drone: DroneUnit, target: DroneUnit, factor: float = 1.0
@@ -1160,6 +1270,22 @@ def create_drones(num_blue: int, num_red: int) -> List[DroneUnit]:
             else:
                 if random.random() < CONFIG["LN2_PROB_ENEMY"]:
                     d.has_ln2 = True
+                    
+    # Tag Kamikaze-capable drones (sacrificial attack)  if feature enabled
+    if CONFIG.get("ENABLE_KAMIKAZE_WEAPON", False):
+        for d in drones:
+            if d.team == "player":
+                if random.random() < CONFIG["KAMIKAZE_PROB_PLAYER"]:
+                    d.is_kamikaze = True
+            else:
+                if random.random() < CONFIG["KAMIKAZE_PROB_ENEMY"]:
+                    d.is_kamikaze = True
+    
+            if d.is_kamikaze:
+                d.role = DroneRole.KAMIKAZE
+                d.kamikaze_armed = True
+                d.kamikaze_damage_hp = CONFIG["KAMIKAZE_DAMAGE_HP"]
+                d.kamikaze_trigger_radius = CONFIG["KAMIKAZE_TRIGGER_RADIUS"]
 
     return drones
 
@@ -1323,7 +1449,7 @@ def apply_ln2_effects(
     shooter: DroneUnit,
     targets: List[DroneUnit],
     state: "DroneScenarioState",
-    campaign_state: CampaignState,   
+    campaign_state: CampaignState,  
 ) -> None:
     """Apply mechanical/thermal effects of liquid nitrogen spray."""
     if not targets:
@@ -1341,7 +1467,7 @@ def apply_ln2_effects(
         t.ln2_disabled_turns = max(t.ln2_disabled_turns, disable_turns)
 
         if t.hp <= 0 and t.status == DroneStatus.ACTIVE:
-            drone_intercepted(t, campaign_state) 
+            drone_intercepted(t, campaign_state)  # on log l’interception
 
     shooter.ln2_cooldown = CONFIG["LN2_COOLDOWN_TURNS"]
 
@@ -1355,6 +1481,57 @@ def apply_ln2_effects(
             "weapon": "LN2",
         }
     )
+
+
+# ============================================================
+# 11ter. Kamikaze attack helper
+# ============================================================
+# ------------------------------------------------------------
+
+def try_kamikaze_attack(state: DroneScenarioState,
+                        campaign_state: Optional[CampaignState] = None) -> None:
+    """
+    Check all kamikaze drones and trigger an explosion if an enemy
+    enters the trigger radius. Sacrificial, Sun Tzu-style exchange:
+    one unit for a high-value target.
+    """
+    for d in state.drones:
+        if not d.is_alive() or not d.is_kamikaze or not d.kamikaze_armed:
+            continue
+
+        enemies = state.get_team_effective_drones(
+            "enemy" if d.team == "player" else "player"
+        )
+        if not enemies:
+            continue
+
+        # nearest enemy
+        target = min(enemies, key=lambda e: d.distance_to(e))
+        dist = d.distance_to(target)
+
+        if dist <= d.kamikaze_trigger_radius:
+            # explosion damage
+            target.hp -= d.kamikaze_damage_hp
+            if target.hp <= 0 and target.status == DroneStatus.ACTIVE:
+                drone_intercepted(target, campaign_state)
+
+            # kamikaze drone is destroyed
+            d.hp = 0.0
+            d.status = DroneStatus.DESTROYED
+            d.kamikaze_armed = False
+            d.vx = d.vy = d.vz = 0.0
+            
+            if campaign_state is not None:
+                campaign_state.total_kamikaze_used += 1
+                if target.hp <= 0:
+                    campaign_state.total_kamikaze_kills += 1
+
+            if campaign_state is not None:
+                campaign_state.log(
+                    f"[KAMIKAZE] {d.id} explodes on {target.id}, "
+                    f"damage={d.kamikaze_damage_hp:.1f}, dist={dist:.2f}"
+                )
+
 
 
 # ============================================================
@@ -1490,310 +1667,6 @@ def export_battle_stats(ds: DroneScenarioState, campaign_state: CampaignState) -
 # ============================================================
 # ------------------------------------------------------------
 
-def run_drone_campaign_old(
-    campaign_state: CampaignState,
-    num_blue: int = 2,
-    num_red: int = 3,
-    max_turns: int = 100,
-) -> None:
-    ds = DroneScenarioState(
-        max_turns=max_turns,
-        weather=campaign_state.weather,
-        map_width=CONFIG["MAP_WIDTH"],
-        map_height=CONFIG["MAP_HEIGHT"],
-    )
-
-    ds.drones = create_drones(num_blue=num_blue, num_red=num_red)
-    ds.init_influence_grids()
-
-    chess_ai = ChessSunTzuAI(
-        map_width=ds.map_width, map_height=ds.map_height
-    )
-    go_ai = GoSunTzuAI(
-        grid_size=20, map_width=ds.map_width, map_height=ds.map_height
-    )
-
-    # Strategic commanders
-    enemy_commander = SquadronCommander(team="enemy")
-    player_commander = SquadronCommander(team="player")
-    enemy_commander.assign_roles(ds.drones)
-    player_commander.assign_roles(ds.drones)
-
-    # Enemy coordination
-    coordinator = EnemySquadCoordinator(go_ai)
-
-    # Enemy AI (may persist across battles)
-    enemy_ai: EnhancedEnemyAI = campaign_state.enemy_ai
-    if enemy_ai is None:
-        enemy_ai = EnhancedEnemyAI(coordinator=coordinator)
-        campaign_state.enemy_ai = enemy_ai
-    else:
-        enemy_ai.coordinator = coordinator
-
-    player_ai = PlayerDroneController(
-        campaign_state.player_controls,
-        commander=player_commander,
-    )
-
-    # Volume & Weather
-    constraints = VolumeConstraints()
-    weather = Weather()
-
-    preset = CONFIG["WEATHER_PRESETS"].get(
-        campaign_state.weather,
-        CONFIG["WEATHER_PRESETS"]["CLEAR"],
-    )
-    weather.wind_vector = np.array(preset["wind"], dtype=float)
-    weather.turbulence_std_xy = preset["turb_xy"]
-    weather.turbulence_std_z = preset["turb_z"]
-    weather.battery_drain_factor = preset["battery_factor"]
-
-    campaign_state.log(
-        f"=== Drone Campaign: {num_red} enemy drones vs {num_blue} player drones "
-        f"(EMP enabled={CONFIG['ENABLE_EMP_WEAPONS']}) ==="
-    )
-
-    dt = 1.0  # time step
-
-    while ds.turn_index < ds.max_turns:
-        ds.turn_index += 1
-        campaign_state.turn += 1
-
-        result = ds.is_battle_over()
-        if result is not None:
-            campaign_state.log(f"[Drone] Battle result: {result}")
-
-            if result == "enemy":
-                winner_team = "enemy"
-            elif result == "player":
-                winner_team = "player"
-            else:
-                winner_team = "draw"
-
-            outcome = {
-                "winner_team": winner_team,
-                "player_alive": len(ds.get_team_drones("player")),
-                "enemy_alive": len(ds.get_team_drones("enemy")),
-                "turns": ds.turn_index,
-            }
-            enemy_ai.observe_outcome(outcome)
-            enemy_ai.decide_personality()
-            break
-
-        chess_enemy = chess_ai.positional_score_for_team(ds, "enemy")
-        chess_player = chess_ai.positional_score_for_team(ds, "player")
-        go_ai.compute_influence(ds)
-        encircled_player = go_ai.detect_encirclement_zones(
-            ds, target_team="player"
-        )
-
-        campaign_state.log(
-            f"[DroneChess] enemy_pos={chess_enemy:.1f}, "
-            f"player_pos={chess_player:.1f}"
-        )
-        if encircled_player:
-            names = ", ".join(d.id for d in encircled_player)
-            campaign_state.log(
-                f"[DroneGo] Player drones encircled: {names}"
-            )
-
-        # ---- AI recommendations (movement + potential kinetic shot) ----
-        planned_moves: Dict[str, Tuple[float, float, float]] = {}
-        planned_shots: List[Tuple[DroneUnit, DroneUnit]] = []
-
-        for d in ds.drones:
-            if not d.is_alive():
-                continue
-
-            if d.team == "enemy":
-                desired_vel, target = enemy_ai.recommend_drone_action(d, ds)
-            else:
-                desired_vel, target = player_ai.recommend_action(d, ds)
-
-            planned_moves[d.id] = desired_vel
-            if target is not None:
-                planned_shots.append((d, target))
-
-        # Collision avoidance
-        extra_vel = apply_collision_avoidance(
-            ds, min_dist=3.0, strength=1.5
-        )
-
-        # ---- Movement + dynamics + weather + volume + battery + EMP status + LN2 ----
-        for d in ds.drones:
-            if not d.is_alive():
-                continue
-
-            # Drone neutralized by EMP/IEM: no movement or AI this turn
-            if getattr(d, "emp_disabled_turns", 0) > 0 or getattr(d, "ln2_disabled_turns", 0) > 0:
-                update_emp_status(d)
-                update_ln2_status(d)
-                update_battery(d, weather, dt)
-                continue
-
-            base_vel = planned_moves.get(d.id, (0.0, 0.0, 0.0))
-            if d.id in extra_vel:
-                evx, evy, evz = extra_vel[d.id]
-                base_vel = (
-                    base_vel[0] + evx,
-                    base_vel[1] + evy,
-                    base_vel[2] + evz,
-                )
-
-            update_drone_dynamics(d, base_vel, dt)
-            apply_weather(d, weather, dt)
-            apply_volume_constraints(d, constraints)
-            update_battery(d, weather, dt)
-            update_emp_status(d)
-            update_ln2_status(d)
-
-        # ---- EMP / IEM firing phase (SPEAR / THOR) ----
-        if CONFIG.get("ENABLE_EMP_WEAPONS", False):
-            for shooter in ds.drones:
-                if not shooter.is_alive():
-                    continue
-
-                targets_emp = decide_emp_use(shooter, ds, coordinator)
-                if not targets_emp:
-                    continue
-
-                for target in targets_emp:
-                    target.emp_disabled_turns = max(
-                        target.emp_disabled_turns,
-                        CONFIG["EMP_DISABLE_DURATION"],
-                    )
-                    target.hp -= CONFIG["EMP_DAMAGE_HP"]
-                    target.battery = max(
-                        0.0,
-                        target.battery - CONFIG["EMP_DAMAGE_BATTERY"],
-                    )
-                    if (
-                        target.hp <= 0
-                        and target.status == DroneStatus.ACTIVE
-                    ):
-                        drone_intercepted(target, campaign_state)
-
-                shooter.emp_cooldown = CONFIG["EMP_COOLDOWN_TURNS"]
-
-                weapon_name = (
-                    "SPEAR" if shooter.team == "player" else "THOR"
-                )
-                campaign_state.log(
-                    f"[EMP] {shooter.id} triggers {weapon_name} IEM on "
-                    f"{len(targets_emp)} target(s) "
-                    f"(r={CONFIG['EMP_RANGE']:.1f})"
-                )
-
-                ds.emp_events.append(
-                    {
-                        "turn": ds.turn_index,
-                        "shooter_id": shooter.id,
-                        "shooter_team": shooter.team,
-                        "num_targets": len(targets_emp),
-                    }
-                )
-                
-        # ---- LN2 (liquid nitrogen) firing phase ----
-        if CONFIG.get("ENABLE_LN2_WEAPON", False):
-            for shooter in ds.drones:
-                if not shooter.is_alive():
-                    continue
-                if getattr(shooter, "ln2_disabled_turns", 0) > 0:
-                    continue
-                if not getattr(shooter, "has_ln2", False):
-                    continue
-
-                targets_ln2 = decide_ln2_use(shooter, ds)
-                if not targets_ln2:
-                    continue
-
-                apply_ln2_effects(shooter, targets_ln2, ds, campaign_state)
-
-                side = "BLUE" if shooter.team == "player" else "RED"
-                campaign_state.log(
-                    f"[LN2-{side}] {shooter.id} sprays liquid nitrogen on "
-                    f"{len(targets_ln2)} target(s) (r={CONFIG['LN2_RANGE']:.1f}, "
-                    f"cone={CONFIG['LN2_CONE_ANGLE_DEG']:.1f}°)"
-                )
-
-        # ---- Kinetic firing phase + stats ----
-        for shooter, target in planned_shots:
-            if not shooter.is_alive() or not target.is_alive():
-                continue
-            if getattr(shooter, "emp_disabled_turns", 0) > 0:
-                continue
-            if getattr(shooter, "ln2_disabled_turns", 0) > 0:
-                continue
-
-            if shooter.emp_disabled_turns > 0:
-                continue
-            if shooter.ammo <= 0:
-                continue
-
-            dist = shooter.distance_to(target)
-            if dist > shooter.weapon_range:
-                continue
-
-            hit_prob = max(
-                0.5,
-                1.5 / (shooter.weapon_range + 1e-6) * shooter.weapon_range
-                - dist / (shooter.weapon_range + 1e-6),
-            )
-
-            if ds.weather == "MEDIUM":
-                hit_prob *= 0.8
-            elif ds.weather == "BAD":
-                hit_prob *= 0.6
-
-            hit = random.random() < hit_prob
-            damage = 0.0
-            if hit:
-                dmg = random.uniform(60, 120)
-                damage = dmg
-                target.hp -= dmg
-                campaign_state.log(
-                    f"[Drone] {shooter.id} hits {target.id} for "
-                    f"{dmg:.1f} HP (dist={dist:.1f})"
-                )
-                if target.hp <= 0 and target.status == DroneStatus.ACTIVE:
-                    drone_intercepted(target, campaign_state)
-            else:
-                campaign_state.log(
-                    f"[Drone] {shooter.id} misses {target.id} "
-                    f"(dist={dist:.1f})"
-                )
-
-            shooter.ammo -= 1
-
-            ds.shot_events.append(
-                {
-                    "turn": ds.turn_index,
-                    "shooter_id": shooter.id,
-                    "shooter_team": shooter.team,
-                    "target_id": target.id,
-                    "hit": hit,
-                    "distance": dist,
-                    "damage": damage,
-                }
-            )
-
-        # ---- History snapshot ----
-        snapshot: Dict[str, Tuple[float, float, float, float, float, DroneStatus]] = {}
-        for d in ds.drones:
-            snapshot[d.id] = (
-                d.x,
-                d.y,
-                d.z,
-                d.hp,
-                d.battery,
-                d.status,
-            )
-        ds.history.append(snapshot)
-
-    export_battle_stats(ds, campaign_state)
-    campaign_state.drone_scenario = ds
-
-
 def run_drone_campaign(
     campaign_state: CampaignState,
     num_blue: int = 2,
@@ -1814,7 +1687,7 @@ def run_drone_campaign(
         map_width=ds.map_width, map_height=ds.map_height
     )
     go_ai = GoSunTzuAI(
-        grid_size=20, map_width=ds.map_width, map_height=ds.map_height
+        grid_size=50, map_width=ds.map_width, map_height=ds.map_height
     )
 
     # Strategic commanders
@@ -1886,6 +1759,7 @@ def run_drone_campaign(
 
         chess_enemy = chess_ai.positional_score_for_team(ds, "enemy")
         chess_player = chess_ai.positional_score_for_team(ds, "player")
+        
         go_ai.compute_influence(ds)
         encircled_player = go_ai.detect_encirclement_zones(
             ds, target_team="player"
@@ -1895,6 +1769,7 @@ def run_drone_campaign(
             f"[DroneChess] enemy_pos={chess_enemy:.1f}, "
             f"player_pos={chess_player:.1f}"
         )
+        
         if encircled_player:
             names = ", ".join(d.id for d in encircled_player)
             campaign_state.log(
@@ -1995,7 +1870,7 @@ def run_drone_campaign(
                     }
                 )
                 
-        # >>> LN2 : nouvelle phase entre EMP et tir cinétique
+        # >>> LN2 : new phase between EMP and kinetic strike
         # ---- LN2 (liquid nitrogen) firing phase ----
         if CONFIG.get("ENABLE_LN2_WEAPON", False):
             for shooter in ds.drones:
@@ -2025,7 +1900,7 @@ def run_drone_campaign(
                 continue
             if getattr(shooter, "emp_disabled_turns", 0) > 0:
                 continue
-            if getattr(shooter, "ln2_disabled_turns", 0) > 0:  # >>> LN2 : bloque tir si le drone est congelé ;-)
+            if getattr(shooter, "ln2_disabled_turns", 0) > 0:  # >>> LN2 : Shooting is blocked if the drone is frozen. ;-)
                 continue
             if shooter.ammo <= 0:
                 continue
@@ -2076,6 +1951,9 @@ def run_drone_campaign(
                     "damage": damage,
                 }
             )
+          
+        if CONFIG.get("ENABLE_KAMIKAZE_WEAPON", False):
+            try_kamikaze_attack(ds, campaign_state)
 
         # ---- History snapshot ----
         snapshot: Dict[str, Tuple[float, float, float, float, float, DroneStatus]] = {}
@@ -2090,8 +1968,23 @@ def run_drone_campaign(
             )
         ds.history.append(snapshot)
 
+
+    metrics = compute_sun_tzu_metrics(campaign_state)
+    sun_tzu_score = compute_sun_tzu_score(metrics, victory=True)
+
+    campaign_state.log(
+        f"[SUN-TZU] exchange={metrics['exchange_ratio']:.2f}, "
+        f"kamikaze_eff={metrics['kamikaze_efficiency']:.2f}, "
+        f"cost={metrics['cost_of_victory']:.1f}, "
+        f"score={sun_tzu_score:.1f}"
+    )
+
+
     export_battle_stats(ds, campaign_state)
     campaign_state.drone_scenario = ds
+    
+
+    
 
 
 # ============================================================
@@ -2146,8 +2039,12 @@ def visualize_drone_battle_3d(campaign_state: CampaignState) -> None:
     shot_misses = ax.scatter([], [], [], c="yellow", marker="x", s=40, label="Miss")
     intercepted_scatter = ax.scatter([], [], [], c="black", label="Intercepted")
 
-    ax.set_xlim(0, ds.map_width)
-    ax.set_ylim(0, ds.map_height)
+    #ax.set_xlim(0, ds.map_width)
+    #ax.set_ylim(0, ds.map_height)
+    
+    ax.set_xlim(-ds.map_width, ds.map_width)
+    ax.set_ylim(-ds.map_height, ds.map_height) 
+    
     ax.set_zlim(0, 25)
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
@@ -2278,6 +2175,7 @@ def visualize_drone_battle_3d(campaign_state: CampaignState) -> None:
         )
 
     anim = FuncAnimation(fig, update, frames=turns, interval=200, blit=False)
+    #anim = FuncAnimation(fig, update, frames=turns, interval=100, blit=False)
     plt.show()
 
 
@@ -2313,11 +2211,15 @@ def visualize_drone_2d_tracks(campaign_state: CampaignState) -> None:
     ax_xy.set_title("Ground trajectories (X–Y)")
     ax_xy.set_xlabel("X")
     ax_xy.set_ylabel("Y")
-    ax_xy.set_xlim(0, ds.map_width)
-    ax_xy.set_ylim(0, ds.map_height)
+    #ax_xy.set_xlim(0, ds.map_width)
+    #ax_xy.set_ylim(0, ds.map_height)
+    
+    ax_xy.set_xlim(-ds.map_width , ds.map_width)
+    ax_xy.set_ylim(-ds.map_height, ds.map_height)
 
     # altitude vs time (plot a few drones)
     max_to_plot = min(6, len(drone_ids))
+    max_to_plot = len(drone_ids)
     for d_id in drone_ids[:max_to_plot]:
         t_axis = list(range(turns))
         if teams[d_id] == "player":
@@ -2403,6 +2305,50 @@ def visualize_influence_heatmaps(
     plt.tight_layout()
     plt.show()
 
+# ============================================================
+#  Debiefing
+# ============================================================
+# ------------------------------------------------------------
+
+def compute_sun_tzu_metrics(campaign: CampaignState) -> Dict[str, float]:
+    if campaign.total_player_losses == 0:
+        exchange_ratio = float("inf") if campaign.total_enemy_losses > 0 else 1.0
+    else:
+        exchange_ratio = campaign.total_enemy_losses / max(1, campaign.total_player_losses)
+
+    kamikaze_eff = 0.0
+    if campaign.total_kamikaze_used > 0:
+        kamikaze_eff = campaign.total_kamikaze_kills / campaign.total_kamikaze_used
+
+    cost_of_victory = campaign.total_player_losses - campaign.total_enemy_losses
+
+    return {
+        "exchange_ratio": exchange_ratio,
+        "kamikaze_efficiency": kamikaze_eff,
+        "cost_of_victory": cost_of_victory,
+    }
+
+def compute_sun_tzu_score(metrics: Dict[str, float], victory: bool) -> float:
+    exchange = metrics["exchange_ratio"]
+    kamikaze_eff = metrics["kamikaze_efficiency"]
+    cost = metrics["cost_of_victory"]
+
+    score = 0.0
+
+    # Very balanced victory/defeat
+    score += 50.0 if victory else -50.0
+
+    # Sun Tzu: Win by losing little -> big bonus if exchange_ratio > 1
+    score += 20.0 * (exchange - 1.0)
+
+    # Kamikaze: bonus if the sacrifices are profitable (efficiency > 1)
+    score += 15.0 * (kamikaze_eff - 1.0)
+
+    # Penalty if the cost of victory is high (many losses)
+    score -= 2.0 * max(0.0, cost)
+
+    return score
+
 
 
 # ============================================================
@@ -2413,8 +2359,10 @@ def visualize_influence_heatmaps(
 if __name__ == "__main__":
 
     # ----- Global Test Settings -----
-    # Enable or disable SPEAR/THOR EMP weapons
+    # Enable or disable SPEAR/THOR EMP weapons or KAMIKAZE
     CONFIG["ENABLE_EMP_WEAPONS"] = True
+    CONFIG["ENABLE_LN2_WEAPON"] = True
+    CONFIG["ENABLE_KAMIKAZE_WEAPON"] = True
 
     # Number of drones and battle duration
     NUM_BLUE = CONFIG["NUM_BLUE_DRONES"]
@@ -2423,6 +2371,7 @@ if __name__ == "__main__":
 
     # Weather selection (CLEAR / MEDIUM / BAD)
     initial_weather = "CLEAR"
+    #initial_weather = "BAD"
 
     # ----- Military campaign status -----
     campaign = CampaignState(
@@ -2433,9 +2382,10 @@ if __name__ == "__main__":
         drone_scenario=None,
         drone_mode_enabled=True,
         player_controls={
-            "player_personality": "defensive",   # "aggressive", "defensive", "deceptive"
+            #"player_personality": "defensive",   # "aggressive", "defensive", "deceptive"
+            "player_personality": "aggressive",   # "aggressive", "defensive", "deceptive"
             "player_aggressiveness": 0.6,        # 0.0 – 1.0
-            "player_pref_distance": 18.0,        # preferred distance
+            "player_pref_distance": 8.0,        # preferred distance
         },
     )
 
@@ -2447,14 +2397,21 @@ if __name__ == "__main__":
         num_red=NUM_RED,
         max_turns=MAX_TURNS,
     )
-
+    
     # 3D visualization if you keep your function
     visualize_drone_battle_3d(campaign)
+    visualize_drone_2d_tracks(campaign)
+    
+    
+    
     
     #...
 
-    # ----- Example: second run without EMP for comparison -----
+    # ----- Example: second run without ... for comparison -----
     CONFIG["ENABLE_EMP_WEAPONS"] = False
+    CONFIG["ENABLE_LN2_WEAPON"] = False
+    CONFIG["ENABLE_KAMIKAZE_WEAPON"] = False
+    
     campaign_no_emp = CampaignState(
         turn=0,
         weather=initial_weather,
@@ -2465,7 +2422,7 @@ if __name__ == "__main__":
         player_controls=campaign.player_controls,
     )
 
-    print("\n=== RUN 2: Drone battle with EMP =", CONFIG['ENABLE_EMP_WEAPONS'], "===\n")
+    print("\n=== RUN 2: Drone battle with No EMP =", CONFIG['ENABLE_EMP_WEAPONS'], "===\n")
     run_drone_campaign(
         campaign_state=campaign_no_emp,
         num_blue=NUM_BLUE,
