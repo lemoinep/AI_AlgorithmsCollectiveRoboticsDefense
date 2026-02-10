@@ -2276,6 +2276,7 @@ if __name__ == "__main__":
 
     # 3D visualization if you keep your function
     visualize_drone_battle_3d(campaign)
+    visualize_drone_2d_tracks(campaign)
     
     #...
 
@@ -2299,9 +2300,9 @@ if __name__ == "__main__":
         max_turns=MAX_TURNS,
     )
 
-    visualize_drone_battle_3d(campaign)
-    visualize_drone_2d_tracks(campaign)
-    visualize_influence_heatmaps(campaign)
+    visualize_drone_battle_3d(campaign_no_emp)
+    visualize_drone_2d_tracks(campaign_no_emp)
+    #visualize_influence_heatmaps(campaign_no_emp)
 
     #...
 

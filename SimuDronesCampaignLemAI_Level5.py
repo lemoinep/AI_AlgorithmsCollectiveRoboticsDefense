@@ -4,6 +4,7 @@
 # For now we will use a swarm of small drones and later we will use AI robot agents
 # which will have different characteristics and will be deployed by a strategic AI.
 
+import os
 import math
 import random
 from dataclasses import dataclass, field
@@ -15,9 +16,9 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 from matplotlib.animation import FuncAnimation
 import numpy as np
 
+import json
 
 # Todo :
-# - Next step Store these parameters in a JSON file so that other scenarios can be loaded.
 # - Perform the visualization using OpenGL or Unity3D – to be decided.
 # - Improve the AI ​​and tactics, add a learning model, and enhance group behavior.
 # - See how to integrate this with real drones.
@@ -28,13 +29,18 @@ import numpy as np
 # ============================================================
 # ------------------------------------------------------------
 
-CONFIG = {
+CONFIG: Dict[str, Any] = {
     # --- Scenario ---
     "NUM_BLUE_DRONES": 100,
     "NUM_RED_DRONES": 100,
     "MAX_TURNS": 50000,
     "MAP_WIDTH": 500,
     "MAP_HEIGHT": 500,
+    
+    "CLUSTER_DISTANCE": 200.0,      # distance cluster
+    "BLUE_CLUSTER_RADII": (40.0, 40.0, 20.0),  # (rx, ry, rz)
+    "RED_CLUSTER_RADII":  (40.0, 40.0, 20.0),
+
 
     # --- EMP / IEM weapons (SPEAR / THOR) ---
     "ENABLE_EMP_WEAPONS": True,
@@ -112,6 +118,34 @@ CONFIG = {
     # --- Visualisation / Heatmaps ---
     "HEATMAP_TURNS": None,  # None => start / mid / end
 }
+
+CONFIG_FILE = "configLem.json"
+
+
+def load_config_from_json(
+    default_config: Dict[str, Any],
+    path: str = CONFIG_FILE,
+    strict_keys: bool = False,
+) -> Dict[str, Any]:
+
+    config = default_config.copy()
+    if not os.path.exists(path):
+        return config  
+
+    with open(path, "r", encoding="utf-8") as f:
+        user_cfg = json.load(f)  # type: Dict[str, Any]
+
+    if strict_keys:
+        unknown = set(user_cfg.keys()) - set(config.keys())
+        if unknown:
+            raise ValueError(f"Unknown keys in {path}: {sorted(unknown)}")
+
+    # surcharge simple (dict plat)
+    for k, v in user_cfg.items():
+        config[k] = v
+
+    return config
+
 
 # ============================================================
 # 0. General utilities
@@ -1290,6 +1324,143 @@ def create_drones(num_blue: int, num_red: int) -> List[DroneUnit]:
     return drones
 
 
+def create_drones_beta(num_blue: int, num_red: int) -> List[DroneUnit]:
+    """Creates two 3D point clouds (blue / red) in ellipsoid shape,
+    with configurable distance between cloud centers.
+    """
+    drones: List[DroneUnit] = []
+    def sample_point_in_ellipsoid(rx: float, ry: float, rz: float) -> Tuple[float, float, float]:
+        while True:
+            x = random.gauss(0.0, 1.0)
+            y = random.gauss(0.0, 1.0)
+            z = random.gauss(0.0, 1.0)
+            r2 = x * x + y * y + z * z
+            if r2 > 0.0:
+                break
+        r = math.sqrt(r2)
+        x /= r
+        y /= r
+        z /= r
+        u = random.random()  # [0,1)
+        radius = u ** (1.0 / 3.0) 
+        x *= radius * rx
+        y *= radius * ry
+        z *= radius * rz
+        return x, y, z
+
+    map_w = CONFIG["MAP_WIDTH"]
+    map_h = CONFIG["MAP_HEIGHT"]
+
+    dist = CONFIG.get("CLUSTER_DISTANCE", map_w * 0.4)
+    # centre global au milieu de la carte
+    cx = map_w * 0.5
+    cy = map_h * 0.5
+
+    # centres des deux nuages, décalés selon X
+    blue_center_x = cx - dist * 0.5
+    red_center_x  = cx + dist * 0.5
+    blue_center_y = cy
+    red_center_y  = cy
+
+    blue_rx, blue_ry, blue_rz = CONFIG.get("BLUE_CLUSTER_RADII", (40.0, 40.0, 40.0))
+    red_rx,  red_ry,  red_rz  = CONFIG.get("RED_CLUSTER_RADII",  (40.0, 40.0, 40.0))
+    
+    
+    
+    print("CLUSTER BLUE: <", blue_rx,",", blue_ry,",", blue_rz,">")
+    print("CLUSTER RED: <", red_rx,",", red_ry,",", red_rz,">")
+    
+    print("MAP:", map_w, map_h, "dist:", dist,
+      "blue_center:", blue_center_x,",", blue_center_y, "red_center:", red_center_x,",",red_center_y)
+
+
+    # --- Blue drones (player) cloud ---
+    for i in range(num_blue):
+        dx, dy, dz = sample_point_in_ellipsoid(blue_rx, blue_ry, blue_rz)
+        x = blue_center_x + dx
+        y = blue_center_y + dy
+        z = max(CONFIG["MIN_ALTITUDE"], dz + blue_rz) 
+
+        drones.append(
+            DroneUnit(
+                id=f"B{i+1}",
+                team="player",
+                x=x,
+                y=y,
+                z=z,
+                hp=120.0,
+                battery=1200.0,
+                sensor_range=30.0,
+                weapon_range=20.0,
+                max_speed=5.0,
+                dyn_max_speed=CONFIG["PLAYER_MAX_SPEED"],
+                dyn_max_accel=CONFIG["PLAYER_MAX_ACCEL"],
+                battery_level=1.0,
+            )
+        )
+
+    # --- Red drones (enemy) cloud ---
+    for j in range(num_red):
+        dx, dy, dz = sample_point_in_ellipsoid(red_rx, red_ry, red_rz)
+        x = red_center_x + dx
+        y = red_center_y + dy
+        z = max(CONFIG["MIN_ALTITUDE"], dz + red_rz)
+
+        drones.append(
+            DroneUnit(
+                id=f"R{j+1}",
+                team="enemy",
+                x=x,
+                y=y,
+                z=z,
+                hp=100.0,
+                battery=1200.0,
+                sensor_range=35.0 if j == 0 else 30.0,
+                weapon_range=22.0 if j == 0 else 20.0,
+                max_speed=5.0,
+                dyn_max_speed=CONFIG["ENEMY_MAX_SPEED"],
+                dyn_max_accel=CONFIG["ENEMY_MAX_ACCEL"],
+                battery_level=1.0,
+            )
+        )
+
+    # --- tags EMP / LN2 / Kamikaze : inchangé ---
+    if CONFIG.get("ENABLE_EMP_WEAPONS", False):
+        for d in drones:
+            if d.team == "player":
+                if random.random() < CONFIG["PLAYER_EMP_PROB"]:
+                    d.has_emp = True
+            else:
+                if random.random() < CONFIG["ENEMY_EMP_PROB"]:
+                    d.has_emp = True
+
+    if CONFIG.get("ENABLE_LN2_WEAPON", False):
+        for d in drones:
+            if d.team == "player":
+                if random.random() < CONFIG["LN2_PROB_PLAYER"]:
+                    d.has_ln2 = True
+            else:
+                if random.random() < CONFIG["LN2_PROB_ENEMY"]:
+                    d.has_ln2 = True
+
+    if CONFIG.get("ENABLE_KAMIKAZE_WEAPON", False):
+        for d in drones:
+            if d.team == "player":
+                if random.random() < CONFIG["KAMIKAZE_PROB_PLAYER"]:
+                    d.is_kamikaze = True
+            else:
+                if random.random() < CONFIG["KAMIKAZE_PROB_ENEMY"]:
+                    d.is_kamikaze = True
+
+            if getattr(d, "is_kamikaze", False):
+                d.role = DroneRole.KAMIKAZE
+                d.kamikaze_armed = True
+                d.kamikaze_damage_hp = CONFIG["KAMIKAZE_DAMAGE_HP"]
+                d.kamikaze_trigger_radius = CONFIG["KAMIKAZE_TRIGGER_RADIUS"]
+
+    return drones
+
+
 # ============================================================
 # 11. Collision avoidance helper
 # ============================================================
@@ -1680,7 +1851,7 @@ def run_drone_campaign(
         map_height=CONFIG["MAP_HEIGHT"],
     )
 
-    ds.drones = create_drones(num_blue=num_blue, num_red=num_red)
+    ds.drones = create_drones_beta(num_blue=num_blue, num_red=num_red)
     ds.init_influence_grids()
 
     chess_ai = ChessSunTzuAI(
@@ -2045,7 +2216,11 @@ def visualize_drone_battle_3d(campaign_state: CampaignState) -> None:
     ax.set_xlim(-ds.map_width, ds.map_width)
     ax.set_ylim(-ds.map_height, ds.map_height) 
     
-    ax.set_zlim(0, 25)
+  
+    #ax.set_zlim(0, 25)
+    
+    ax.set_zlim(0, ds.map_width // 2)
+    
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_zlabel("Z (altitude)")
@@ -2357,6 +2532,9 @@ def compute_sun_tzu_score(metrics: Dict[str, float], victory: bool) -> float:
 # ------------------------------------------------------------
 
 if __name__ == "__main__":
+    
+    # ----- Load Configuation -----
+    CONFIG = load_config_from_json(CONFIG)
 
     # ----- Global Test Settings -----
     # Enable or disable SPEAR/THOR EMP weapons or KAMIKAZE
@@ -2401,38 +2579,39 @@ if __name__ == "__main__":
     # 3D visualization if you keep your function
     visualize_drone_battle_3d(campaign)
     visualize_drone_2d_tracks(campaign)
-    
+
     
     
     
     #...
 
-    # ----- Example: second run without ... for comparison -----
-    CONFIG["ENABLE_EMP_WEAPONS"] = False
-    CONFIG["ENABLE_LN2_WEAPON"] = False
-    CONFIG["ENABLE_KAMIKAZE_WEAPON"] = False
-    
-    campaign_no_emp = CampaignState(
-        turn=0,
-        weather=initial_weather,
-        logs=[],
-        enemy_ai=campaign.enemy_ai,  # we are using the trained enemy AI
-        drone_scenario=None,
-        drone_mode_enabled=True,
-        player_controls=campaign.player_controls,
-    )
+    if (True):
+        # ----- Example: second run without ... for comparison -----
+        CONFIG["ENABLE_EMP_WEAPONS"] = False
+        CONFIG["ENABLE_LN2_WEAPON"] = False
+        CONFIG["ENABLE_KAMIKAZE_WEAPON"] = False
+        
+        campaign_no_emp = CampaignState(
+            turn=0,
+            weather=initial_weather,
+            logs=[],
+            enemy_ai=campaign.enemy_ai,  # we are using the trained enemy AI
+            drone_scenario=None,
+            drone_mode_enabled=True,
+            player_controls=campaign.player_controls,
+        )
 
-    print("\n=== RUN 2: Drone battle with No EMP =", CONFIG['ENABLE_EMP_WEAPONS'], "===\n")
-    run_drone_campaign(
-        campaign_state=campaign_no_emp,
-        num_blue=NUM_BLUE,
-        num_red=NUM_RED,
-        max_turns=MAX_TURNS,
-    )
+        print("\n=== RUN 2: Drone battle with No EMP =", CONFIG['ENABLE_EMP_WEAPONS'], "===\n")
+        run_drone_campaign(
+            campaign_state=campaign_no_emp,
+            num_blue=NUM_BLUE,
+            num_red=NUM_RED,
+            max_turns=MAX_TURNS,
+        )
 
-    visualize_drone_battle_3d(campaign)
-    visualize_drone_2d_tracks(campaign)
-    visualize_influence_heatmaps(campaign)
+        visualize_drone_battle_3d(campaign_no_emp)
+        visualize_drone_2d_tracks(campaign_no_emp)
+        visualize_influence_heatmaps(campaign_no_emp)
 
     #...
 

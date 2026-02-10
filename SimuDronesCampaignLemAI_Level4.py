@@ -2148,7 +2148,9 @@ def visualize_drone_battle_3d(campaign_state: CampaignState) -> None:
 
     ax.set_xlim(0, ds.map_width)
     ax.set_ylim(0, ds.map_height)
-    ax.set_zlim(0, 25)
+    #ax.set_zlim(0, 25)
+    ax.set_zlim(0, ds.map_width // 2)
+    
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_zlabel("Z (altitude)")
@@ -2450,6 +2452,7 @@ if __name__ == "__main__":
 
     # 3D visualization if you keep your function
     visualize_drone_battle_3d(campaign)
+    visualize_drone_2d_tracks(campaign)
     
     #...
 
@@ -2473,9 +2476,9 @@ if __name__ == "__main__":
         max_turns=MAX_TURNS,
     )
 
-    visualize_drone_battle_3d(campaign)
-    visualize_drone_2d_tracks(campaign)
-    visualize_influence_heatmaps(campaign)
+    visualize_drone_battle_3d(campaign_no_emp)
+    visualize_drone_2d_tracks(campaign_no_emp)
+    #visualize_influence_heatmaps(campaign_no_emp)
 
     #...
 
